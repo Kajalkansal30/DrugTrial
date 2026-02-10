@@ -1,0 +1,84 @@
+# ============================
+# Python version
+# ============================
+# Python == 3.10.x REQUIRED
+
+# ============================
+# Core Web Framework
+# ============================
+fastapi==0.109.0
+uvicorn[standard]==0.27.0
+
+# ============================
+# Data & Validation
+# ============================
+pydantic==2.5.3
+pydantic-settings==2.1.0
+jsonschema==4.20.0
+python-multipart==0.0.6
+python-dateutil==2.8.2
+python-dotenv==1.0.0
+
+# ============================
+# Databases
+# ============================
+sqlalchemy==2.0.25
+psycopg2-binary==2.9.9
+pymongo==4.6.1
+
+# ============================
+# ML / NLP CORE (PINNED!)
+# ============================
+numpy==1.26.3
+pandas==2.2.0
+scikit-learn==1.1.2
+packaging==24.2
+
+# ============================
+# spaCy + SciSpacy (COMPATIBLE SET)
+# ============================
+spacy>=3.7.1,<3.8.0
+scispacy==0.5.4
+# Install spaCy models after pip install:
+# pip install https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.7.1/en_core_web_sm-3.7.1-py3-none-any.whl
+# pip install https://s3-us-west-2.amazonaws.com/ai2-s2-scispacy/releases/v0.5.4/en_core_sci_sm-0.5.4.tar.gz
+
+# ============================
+# Transformers / Embeddings
+# ============================
+torch==2.2.0
+transformers==4.37.2
+sentence-transformers==2.3.1
+
+# ============================
+# Vector DB
+# ============================
+chromadb==0.4.22
+
+# ============================
+# PDF / Document Processing
+# ============================
+pypdf2==3.0.1
+pdfplumber==0.10.3
+PyMuPDF==1.23.8
+
+# ============================
+# HTTP
+# ============================
+httpx>=0.27,<0.29
+requests==2.31.0
+
+# ============================
+# LLM Orchestration
+# ============================
+langchain==0.2.1
+langchain-community==0.2.1
+langchain-ollama==0.1.1
+
+# ============================
+# Utilities
+# ============================
+faker==22.6.0
+usaddress==0.5.10
+passlib[bcrypt]==1.7.4
+python-jose[cryptography]==3.3.0

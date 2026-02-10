@@ -1,0 +1,480 @@
+"""
+Main FastAPI Application
+Drug Trial Automation System - Standalone Version
+Run with: uvicorn app:app --reload
+"""
+# from fastapi import FastAPI, HTTPException
+# from fastapi.middleware.cors import CORSMiddleware
+# from pydantic import BaseModel
+# from typing import List, Optional
+# from backend.db_models import get_session, Patient, Condition, Medication, Observation, Allergy, Immunization, ClinicalTrial, EligibilityCriteria, PatientEligibility
+# from backend.agents.eligibility_matcher import EligibilityMatcher
+# from backend.agents.fda_processor import FDAProcessor
+# from datetime import datetime
+import os
+import sys
+from typing import List, Optional, Dict, Any
+from datetime import datetime
+from pydantic import BaseModel
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from backend.db_models import get_session, Patient, Condition, Medication, Observation, Allergy, Immunization, PatientEligibility, ClinicalTrial, EligibilityCriteria
+import sys
+
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from backend.routers import fda_router, trials, audit_router, privacy_router
+from backend.utils.auditor import Auditor
+
+app = FastAPI(
+    title="Drug Trial Automation API",
+    description="End-to-end automated drug trial system",
+    version="1.0.0"
+)
+
+# CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000", "http://localhost", "http://127.0.0.1:3000", "*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Include routers
+app.include_router(fda_router.router, prefix="/api/fda", tags=["FDA Forms"])
+app.include_router(audit_router.router)
+app.include_router(privacy_router.router)
+app.include_router(trials.router) # trials.py already has prefix /api/trials
+
+# Pydantic Models
+class PatientResponse(BaseModel):
+    id: str
+    birthdate: str
+    gender: str
+
+class BatchEligibilityRequest(BaseModel):
+    patient_ids: List[str]
+    trial_id: int
+
+class EligibilityRequest(BaseModel):
+    patient_id: str
+    trial_id: int
+
+class TrialCreate(BaseModel):
+    trial_id: str
+    protocol_title: str
+    phase: str
+    indication: str
+    drug_name: str
+
+# Routes
+@app.get("/")
+async def root():
+    return {
+        "message": "Drug Trial Automation API",
+        "version": "1.0.0",
+        "status": "running",
+        "endpoints": [
+            "/patients",
+            "/patients/{patient_id}",
+            "/trials",
+            "/eligibility/check",
+            "/fda/extract",
+            "/api/fda/upload",
+            "/api/fda/documents",
+            "/api/fda/forms/{document_id}"
+        ]
+    }
+
+@app.get("/health")
+async def health_check():
+    """Health check"""
+    return {
+        "status": "healthy"
+    }
+
+@app.get("/api/patients")
+async def get_patients(limit: int = 100):
+    """Get all patients"""
+    session = get_session()
+    patients = session.query(Patient).limit(limit).all()
+    
+    result = [
+        {
+            "id": p.id,
+            "birthdate": str(p.birthdate),
+            "gender": p.gender,
+            "city": p.city,
+            "state": p.state
+        }
+        for p in patients
+    ]
+    
+    session.close()
+    return {"patients": result, "count": len(result)}
+
+@app.get("/api/patients/{patient_id}")
+async def get_patient_details(patient_id: str):
+    """Get detailed patient information"""
+    session = get_session()
+    
+    patient = session.query(Patient).filter_by(id=patient_id).first()
+    if not patient:
+        session.close()
+        raise HTTPException(status_code=404, detail="Patient not found")
+    
+    conditions = session.query(Condition).filter_by(patient_id=patient_id).all()
+    medications = session.query(Medication).filter_by(patient_id=patient_id).all()
+    observations = session.query(Observation).filter_by(patient_id=patient_id).all()
+    allergies = session.query(Allergy).filter_by(patient_id=patient_id).all()
+    immunizations = session.query(Immunization).filter_by(patient_id=patient_id).all()
+    
+    result = {
+        "patient": {
+            "id": patient.id,
+            "birthdate": str(patient.birthdate),
+            "gender": patient.gender,
+            "race": patient.race,
+            "city": patient.city,
+            "state": patient.state
+        },
+        "conditions": [
+            {
+                "code": c.code,
+                "description": c.description,
+                "start_date": str(c.start_date)
+            }
+            for c in conditions
+        ],
+        "medications": [
+            {
+                "code": m.code,
+                "description": m.description,
+                "start_date": str(m.start_date)
+            }
+            for m in medications
+        ],
+        "observations": [
+            {
+                "code": o.code,
+                "description": o.description,
+                "value": o.value,
+                "units": o.units,
+                "date": str(o.observation_date)
+            }
+            for o in observations
+        ],
+        "allergies": [
+            {
+                "code": a.code,
+                "description": a.description,
+                "type": a.allergy_type,
+                "category": a.category,
+                "reaction": a.reaction1,
+                "severity": a.severity1
+            }
+            for a in allergies
+        ],
+        "immunizations": [
+            {
+                "code": i.code,
+                "description": i.description,
+                "date": str(i.immunization_date)
+            }
+            for i in immunizations
+        ]
+    }
+    
+    session.close()
+    return result
+
+@app.get("/api/trials")
+async def get_trials():
+    """Get all clinical trials"""
+    session = get_session()
+    trials = session.query(ClinicalTrial).all()
+    
+    result = [
+        {
+            "id": t.id,
+            "trial_id": t.trial_id,
+            "protocol_title": t.protocol_title,
+            "phase": t.phase,
+            "indication": t.indication,
+            "drug_name": t.drug_name,
+            "status": t.status
+        }
+        for t in trials
+    ]
+    
+    session.close()
+    return {"trials": result, "count": len(result)}
+
+@app.post("/api/trials")
+async def create_trial(trial: TrialCreate):
+    """Create a new clinical trial"""
+    session = get_session()
+    
+    # Check if trial_id already exists
+    existing = session.query(ClinicalTrial).filter_by(trial_id=trial.trial_id).first()
+    if existing:
+        session.close()
+        raise HTTPException(status_code=400, detail="Trial ID already exists")
+    
+    new_trial = ClinicalTrial(
+        trial_id=trial.trial_id,
+        protocol_title=trial.protocol_title,
+        phase=trial.phase,
+        indication=trial.indication,
+        drug_name=trial.drug_name,
+        status="active"
+    )
+    
+    session.add(new_trial)
+    session.commit()
+    
+    # Audit log
+    auditor = Auditor(session)
+    auditor.log(
+        action="Trial Created",
+        agent="SystemAdmin",
+        target_type="trial",
+        target_id=new_trial.trial_id,
+        status="Success",
+        details={
+            "protocol_title": trial.protocol_title,
+            "phase": trial.phase,
+            "drug_name": trial.drug_name
+        }
+    )
+    
+    result = {
+        "id": new_trial.id,
+        "trial_id": new_trial.trial_id,
+        "message": "Trial created successfully"
+    }
+    
+    session.close()
+    return result
+
+@app.post("/api/eligibility/batch-check")
+async def batch_check_eligibility(request: BatchEligibilityRequest):
+    """Check eligibility for multiple patients (Optimized)"""
+    from backend.agents.eligibility_matcher import EligibilityMatcher
+    
+    session = get_session()
+    try:
+        matcher = EligibilityMatcher(db_session=session)
+        # 1. Run batch evaluation
+        results = matcher.evaluate_batch(request.patient_ids, request.trial_id)
+        
+        # 2. Save results to Database (Bulk Upsert Logic)
+        # Fetch existing records to decide INSERT vs UPDATE
+        existing_records = session.query(PatientEligibility).filter(
+            PatientEligibility.trial_id == request.trial_id,
+            PatientEligibility.patient_id.in_(request.patient_ids)
+        ).all()
+        
+        existing_map = {r.patient_id: r for r in existing_records}
+        
+        to_add = []
+        
+        for pid, res in results.items():
+            is_eligible = res['eligible']
+            confidence = res['confidence']
+            status = 'eligible' if is_eligible else 'not_eligible'
+            
+            if pid in existing_map:
+                # Update existing
+                rec = existing_map[pid]
+                rec.eligibility_status = status
+                rec.confidence_score = confidence
+                rec.evaluation_date = datetime.utcnow()
+                # rec.reasons = res['reasons'] # structured_data column if exists
+            else:
+                # Create new
+                new_rec = PatientEligibility(
+                    patient_id=pid,
+                    trial_id=request.trial_id,
+                    eligibility_status=status,
+                    confidence_score=confidence,
+                    evaluation_date=datetime.utcnow()
+                )
+                session.add(new_rec) # Add individually or collect list
+        
+        session.commit()
+        
+        # Audit log
+        auditor = Auditor(session)
+        auditor.log(
+            action="Batch Eligibility Check",
+            agent="SafetyReportingAgent v2.1",
+            target_type="trial",
+            target_id=str(request.trial_id),
+            status="Success",
+            details={
+                "patient_count": len(request.patient_ids),
+                "eligible_count": sum(1 for r in results.values() if r['eligible'])
+            }
+        )
+        
+        return {"results": results}
+        
+    except Exception as e:
+        session.rollback()
+        print(f"Batch check error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        session.close()
+
+@app.post("/api/eligibility/check")
+async def check_eligibility(request: EligibilityRequest):
+    """Check patient eligibility for a trial"""
+    from backend.agents.eligibility_matcher import EligibilityMatcher
+    
+    # Use a single session for both matcher and saving result
+    session = get_session()
+    try:
+        matcher = EligibilityMatcher(db_session=session)
+        
+        result = matcher.evaluate_eligibility(request.patient_id, request.trial_id)
+        
+        # Save result to database (Upsert logic)
+        existing_record = session.query(PatientEligibility).filter_by(
+            patient_id=request.patient_id, 
+            trial_id=request.trial_id
+        ).first()
+
+        if existing_record:
+            existing_record.eligibility_status = 'eligible' if result['eligible'] else 'not_eligible'
+            existing_record.confidence_score = result['confidence']
+            existing_record.evaluation_date = datetime.utcnow()
+        else:
+            eligibility_record = PatientEligibility(
+                patient_id=request.patient_id,
+                trial_id=request.trial_id,
+                eligibility_status='eligible' if result['eligible'] else 'not_eligible',
+                confidence_score=result['confidence']
+            )
+            session.add(eligibility_record)
+        
+        session.commit()
+        
+        # Audit log
+        auditor = Auditor(session)
+        auditor.log(
+            action="Eligibility Check",
+            agent="SafetyReportingAgent v2.1",
+            target_type="patient",
+            target_id=request.patient_id,
+            status="Success",
+            details={
+                "trial_id": request.trial_id,
+                "eligible": result['eligible'],
+                "confidence": result['confidence']
+            }
+        )
+        
+        return {
+            "patient_id": request.patient_id,
+            "trial_id": request.trial_id,
+            "eligibility_status": 'eligible' if result['eligible'] else 'not_eligible',
+            "confidence_score": result['confidence'],
+            "reasons": result['reasons']
+        }
+    except Exception as e:
+        session.rollback()
+        raise e
+    finally:
+        session.close()
+
+@app.post("/api/fda/extract")
+async def extract_fda_forms(pdf_filename: str = "2.pdf"):
+    """Extract FDA form data from drug documentation PDF"""
+    pdf_path = f"data/drug/{pdf_filename}"
+    
+    if not os.path.exists(pdf_path):
+        raise HTTPException(status_code=404, detail=f"PDF file not found: {pdf_path}")
+    
+    # Calculate file hash for audit trail
+    file_hash = Auditor.calculate_file_hash(pdf_path)
+    
+    from backend.agents.fda_processor import FDAProcessor
+    extractor = FDAProcessor()
+    result = extractor.process_pdf(pdf_path)
+    
+    session = get_session()
+    auditor = Auditor(session)
+    
+    if 'error' in result:
+        auditor.log(
+            action="FDA Form Extraction",
+            agent="SafetyReportingAgent v2.1",
+            target_type="document",
+            target_id=pdf_filename,
+            status="Failure",
+            details={"error": result['error']},
+            document_hash=file_hash
+        )
+        session.close()
+        raise HTTPException(status_code=500, detail=result['error'])
+    
+    # Audit log success
+    auditor.log(
+        action="FDA Form Extraction",
+        agent="SafetyReportingAgent v2.1",
+        target_type="document",
+        target_id=pdf_filename,
+        status="Success",
+        details={
+            "ind_number": result.get('fda_1571', {}).get('ind_number'),
+            "protocol_title": result.get('fda_1571', {}).get('protocol_title')
+        },
+        document_hash=file_hash
+    )
+    session.close()
+    
+    # Validate
+    validation_1571 = result['validation']['form_1571']
+    validation_1572 = result['validation']['form_1572']
+    
+    return {
+        "fda_1571": result['fda_1571'],
+        "fda_1572": result['fda_1572'],
+        "validation": {
+            "form_1571": validation_1571,
+            "form_1572": validation_1572
+        }
+    }
+
+@app.post("/api/data/import")
+async def import_data():
+    """Import patient data from CSV files"""
+    from import_data import import_all_data
+    
+    try:
+        import_all_data()
+        return {"message": "Data import completed successfully"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/stats")
+async def get_stats():
+    """Get system statistics"""
+    session = get_session()
+    
+    stats = {
+        "total_patients": session.query(Patient).count(),
+        "total_conditions": session.query(Condition).count(),
+        "total_trials": session.query(ClinicalTrial).count(),
+        "total_eligibility_checks": session.query(PatientEligibility).count()
+    }
+    
+    session.close()
+    return stats
+
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.getenv("PORT", 8201))
+    uvicorn.run(app, host="0.0.0.0", port=port)

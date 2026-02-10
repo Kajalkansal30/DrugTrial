@@ -1,0 +1,425 @@
+.fda-processing-page {
+    padding: 20px;
+    max-width: 1400px;
+    margin: 0 auto;
+}
+
+.fda-processing-page h1 {
+    color: #2c3e50;
+    margin-bottom: 30px;
+}
+
+/* Upload Section */
+.upload-section {
+    background: white;
+    padding: 30px;
+    border-radius: 8px;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+    margin-bottom: 30px;
+}
+
+.upload-section h2 {
+    margin-top: 0;
+    color: #34495e;
+}
+
+.upload-area {
+    display: flex;
+    gap: 15px;
+    align-items: center;
+    margin-top: 20px;
+}
+
+#file-input {
+    display: none;
+}
+
+.file-label {
+    flex: 1;
+    padding: 12px 20px;
+    background: #ecf0f1;
+    border: 2px dashed #95a5a6;
+    border-radius: 6px;
+    cursor: pointer;
+    text-align: center;
+    transition: all 0.3s;
+}
+
+.file-label:hover {
+    background: #d5dbdb;
+    border-color: #7f8c8d;
+}
+
+.upload-button {
+    padding: 12px 30px;
+    background: #3498db;
+    color: white;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 16px;
+    transition: background 0.3s;
+}
+
+.upload-button:hover:not(:disabled) {
+    background: #2980b9;
+}
+
+.upload-button:disabled {
+    background: #95a5a6;
+    cursor: not-allowed;
+}
+
+.progress-bar {
+    margin-top: 15px;
+    height: 6px;
+    background: #ecf0f1;
+    border-radius: 3px;
+    overflow: hidden;
+}
+
+.progress-fill {
+    height: 100%;
+    background: #3498db;
+    transition: width 0.3s;
+}
+
+/* Documents Section */
+.documents-section {
+    background: white;
+    padding: 30px;
+    border-radius: 8px;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+}
+
+.documents-section h2 {
+    margin-top: 0;
+    color: #34495e;
+}
+
+.documents-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 20px;
+}
+
+.documents-table th {
+    background: #34495e;
+    color: white;
+    padding: 12px;
+    text-align: left;
+    font-weight: 600;
+}
+
+.documents-table td {
+    padding: 12px;
+    border-bottom: 1px solid #ecf0f1;
+}
+
+.documents-table tr:hover {
+    background: #f8f9fa;
+}
+
+.status-badge {
+    padding: 4px 12px;
+    border-radius: 12px;
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+}
+
+.status-extracted {
+    background: #fff3cd;
+    color: #856404;
+}
+
+.status-reviewed {
+    background: #cce5ff;
+    color: #004085;
+}
+
+.status-signed {
+    background: #d4edda;
+    color: #155724;
+}
+
+.action-button {
+    padding: 6px 12px;
+    margin-right: 8px;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 14px;
+    transition: all 0.3s;
+}
+
+.action-button.view {
+    background: #3498db;
+    color: white;
+}
+
+.action-button.view:hover {
+    background: #2980b9;
+}
+
+.action-button.delete {
+    background: #e74c3c;
+    color: white;
+}
+
+.action-button.delete:hover {
+    background: #c0392b;
+}
+
+/* Form Viewer */
+.form-viewer {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: white;
+    z-index: 1000;
+    overflow-y: auto;
+}
+
+.form-viewer-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 20px 30px;
+    background: #34495e;
+    color: white;
+}
+
+.form-viewer-header h2 {
+    margin: 0;
+}
+
+.close-button {
+    background: transparent;
+    border: none;
+    color: white;
+    font-size: 24px;
+    cursor: pointer;
+    padding: 5px 10px;
+}
+
+.close-button:hover {
+    background: rgba(255, 255, 255, 0.1);
+    border-radius: 4px;
+}
+
+.document-status {
+    padding: 15px 30px;
+    background: #ecf0f1;
+    display: flex;
+    gap: 30px;
+}
+
+.form-tabs {
+    display: flex;
+    background: #f8f9fa;
+    padding: 0 30px;
+    border-bottom: 2px solid #dee2e6;
+}
+
+.form-tabs button {
+    padding: 15px 30px;
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    font-size: 16px;
+    color: #6c757d;
+    border-bottom: 3px solid transparent;
+    transition: all 0.3s;
+}
+
+.form-tabs button.active {
+    color: #3498db;
+    border-bottom-color: #3498db;
+}
+
+.form-tabs button:hover {
+    color: #2980b9;
+}
+
+.form-content {
+    padding: 30px;
+    max-width: 1000px;
+    margin: 0 auto;
+}
+
+.form-section h3 {
+    color: #2c3e50;
+    margin-top: 30px;
+    margin-bottom: 20px;
+    padding-bottom: 10px;
+    border-bottom: 2px solid #ecf0f1;
+}
+
+.form-field {
+    margin-bottom: 20px;
+}
+
+.form-field label {
+    display: block;
+    margin-bottom: 8px;
+    color: #34495e;
+    font-weight: 500;
+}
+
+.form-field input {
+    width: 100%;
+    padding: 10px;
+    border: 1px solid #ced4da;
+    border-radius: 4px;
+    font-size: 14px;
+}
+
+.form-field input.null-field {
+    background: #fff3cd;
+    border-color: #ffc107;
+}
+
+.field-value {
+    padding: 10px;
+    background: #f8f9fa;
+    border-radius: 4px;
+    min-height: 40px;
+}
+
+.field-value.null-field {
+    background: #fff3cd;
+    color: #856404;
+    font-style: italic;
+}
+
+.form-actions {
+    padding: 20px 30px;
+    background: #f8f9fa;
+    border-top: 1px solid #dee2e6;
+    display: flex;
+    gap: 15px;
+    justify-content: center;
+}
+
+.save-button,
+.review-button,
+.sign-button {
+    padding: 12px 30px;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 16px;
+    font-weight: 600;
+    transition: all 0.3s;
+}
+
+.save-button {
+    background: #3498db;
+    color: white;
+}
+
+.save-button:hover:not(:disabled) {
+    background: #2980b9;
+}
+
+.review-button {
+    background: #9b59b6;
+    color: white;
+}
+
+.review-button:hover {
+    background: #8e44ad;
+}
+
+.sign-button {
+    background: #27ae60;
+    color: white;
+}
+
+.sign-button:hover:not(:disabled) {
+    background: #229954;
+}
+
+.sign-button:disabled {
+    background: #95a5a6;
+    cursor: not-allowed;
+}
+
+/* Modal */
+.modal-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.5);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 2000;
+}
+
+.modal-content {
+    background: white;
+    padding: 30px;
+    border-radius: 8px;
+    max-width: 500px;
+    width: 90%;
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+}
+
+.modal-content h3 {
+    margin-top: 0;
+    color: #2c3e50;
+}
+
+.modal-content .warning {
+    background: #fff3cd;
+    color: #856404;
+    padding: 10px;
+    border-radius: 4px;
+    margin-bottom: 20px;
+}
+
+.checkbox-field {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin: 20px 0;
+}
+
+.checkbox-field input[type="checkbox"] {
+    width: 18px;
+    height: 18px;
+    cursor: pointer;
+}
+
+.checkbox-field label {
+    cursor: pointer;
+    margin: 0;
+}
+
+.modal-actions {
+    display: flex;
+    gap: 15px;
+    justify-content: flex-end;
+    margin-top: 25px;
+}
+
+.cancel-button {
+    padding: 12px 30px;
+    background: #95a5a6;
+    color: white;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 16px;
+    transition: background 0.3s;
+}
+
+.cancel-button:hover {
+    background: #7f8c8d;
+}

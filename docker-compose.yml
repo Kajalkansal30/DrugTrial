@@ -1,0 +1,84 @@
+# version: '3.8'
+
+services:
+  # PostgreSQL Database - Clinical Trial Data
+  postgres:
+    image: postgres:15-alpine
+    container_name: drugtrial_postgres
+    environment:
+      POSTGRES_USER: druguser
+      POSTGRES_PASSWORD: drugpass
+      POSTGRES_DB: drugtrial
+    ports:
+      - "5435:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./backend/database/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U druguser -d drugtrial"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+
+
+  # Backend API - FastAPI with AI Agents (Monolithic with Ollama)
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: drugtrial_backend
+    ports:
+      - "8201:8201"
+    environment:
+      - DATABASE_URL=postgresql+psycopg2://druguser:drugpass@postgres:5432/drugtrial
+      - OLLAMA_URL=http://localhost:11434
+      - PYTHONUNBUFFERED=1
+      - PYTHONPATH=.
+      - PORT=8201
+    volumes:
+      - .:/app
+      - ./data:/app/data
+      - ollama_data:/root/.ollama
+    depends_on:
+      postgres:
+        condition: service_healthy
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8201/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+
+  # Frontend - React Dashboard
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        - REACT_APP_API_URL=https://ai.veersalabs.com/drugtrial-be
+    container_name: drugtrial_frontend
+    ports:
+      - "3000:3000"
+    environment:
+      - REACT_APP_API_URL=https://ai.veersalabs.com/drugtrial-be
+      - CHOKIDAR_USEPOLLING=true
+    depends_on:
+      - backend
+    # command: npm start (Nginx uses default CMD)
+
+volumes:
+  postgres_data:
+  ollama_data:
+  frontend_node_modules:
+
+networks:
+  default:
+    name: drugtrial_network
