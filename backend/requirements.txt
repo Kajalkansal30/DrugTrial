@@ -56,4 +56,9 @@ jsonschema==4.20.0
 
 # Utilities
 python-dateutil==2.8.2
+neo4j==5.12.0
+biopython==1.81
+rdkit==2023.9.4
+pubchempy==1.0.4
 
+pdf2image==1.17.0

@@ -3,7 +3,7 @@ FDA Form Processing API Router
 Endpoints for uploading PDFs, extracting forms, reviewing, and e-signing
 """
 
-from fastapi import APIRouter, UploadFile, File, HTTPException, Depends
+from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, BackgroundTasks
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
@@ -40,6 +40,7 @@ class TestRequest(BaseModel):
 
 @router.post("/upload")
 async def upload_and_process_pdf(
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     session: Session = Depends(get_session)
 ):
@@ -188,8 +189,20 @@ async def upload_and_process_pdf(
                 }
             )
             session.add(form_1572)
-            
             session.commit()
+            
+            # 3. Trigger Background Analysis
+            indication = result.get('fda_1571', {}).get('indication')
+            if indication and indication != "Unknown":
+                from backend.routers.trials import run_ltaa_analysis
+                background_tasks.add_task(run_ltaa_analysis, indication, str(doc.id)) 
+                yield json.dumps({"type": "log", "message": f"📊 Triggering Research Intelligence for: {indication}..."}) + "\n"
+                
+            from backend.routers.trials import run_insilico_analysis, extract_pdf_text
+            yield json.dumps({"type": "log", "message": "🧪 Triggering Deep In Silico scan in background..."}) + "\n"
+            
+            full_text = extract_pdf_text(file_path)
+            background_tasks.add_task(run_insilico_analysis, doc.id, full_text)
             
             # 3. Final Response
             final_response = {
@@ -526,7 +539,11 @@ async def test_criteria(request: TestRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/documents/{document_id}/create-trial")
-async def create_trial_from_document(document_id: int, session: Session = Depends(get_session)):
+async def create_trial_from_document(
+    document_id: int, 
+    background_tasks: BackgroundTasks,
+    session: Session = Depends(get_session)
+):
     """
     Convert a processed FDA document into a Clinical Trial record.
     Triggers eligibility criteria extraction.
@@ -674,12 +691,21 @@ async def create_trial_from_document(document_id: int, session: Session = Depend
             
             session.commit()
             
-        return {
-            "success": True,
-            "trial_id": new_trial.trial_id,
-            "db_id": new_trial.id,
-            "message": "Trial created and criteria extracted"
-        }
+            # 4. Queue Background LTAA Analysis (Research Intelligence)
+            if indication and indication != "Unknown":
+                try:
+                    from backend.routers.trials import run_ltaa_analysis
+                    background_tasks.add_task(run_ltaa_analysis, indication, new_trial.trial_id)
+                    print(f"🔄 Queued background LTAA analysis for: {indication}")
+                except Exception as e:
+                    print(f"⚠️ Failed to queue LTAA analysis: {e}")
+
+            return {
+                "success": True,
+                "trial_id": new_trial.trial_id,
+                "db_id": new_trial.id,
+                "message": "Trial created and criteria extracted"
+            }
         
     except Exception as e:
         session.rollback()

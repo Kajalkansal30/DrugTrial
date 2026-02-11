@@ -1,8 +1,9 @@
-from fastapi import APIRouter, UploadFile, File, HTTPException, Depends
+from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, BackgroundTasks
 from sqlalchemy.orm import Session
 import os
 import shutil
 import uuid
+import logging
 from typing import List, Dict
 from backend.db_models import get_session, Patient, ClinicalTrial, EligibilityCriteria
 from backend.agents.protocol_rule_agent import ProtocolRuleAgent
@@ -10,6 +11,7 @@ from backend.agents.fda_processor import FDAProcessor
 import json
 
 router = APIRouter(prefix="/api/trials", tags=["trials"])
+logger = logging.getLogger(__name__)
 
 # Ensure uploads directory exists
 UPLOAD_DIR = "uploads"
@@ -18,6 +20,7 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 # Lazy-load agents to prevent startup hang
 _nlp_agent = None
 _form_extractor = None
+_ocr_processor = None
 
 def get_nlp_agent():
     global _nlp_agent
@@ -43,9 +46,115 @@ def get_form_extractor():
             print(f"❌ Error initializing FDAProcessor: {e}")
     return _form_extractor
 
+def get_ocr_processor():
+    global _ocr_processor
+    if _ocr_processor is None:
+        try:
+            from backend.utils.ocr_processor import OCRProcessor
+            _ocr_processor = OCRProcessor()
+        except Exception as e:
+            logger.error(f"Failed to init OCR processor: {e}")
+    return _ocr_processor
+
+
+def run_ltaa_analysis(indication: str, trial_id: str):
+    """
+    Background task to run LTAA (Research Intelligence) analysis.
+    This runs asynchronously after upload to avoid blocking the request.
+    """
+    try:
+        logger.info(f"📊 [BACKGROUND] Starting LTAA for: {indication}")
+        from backend.agents.ltaa_agent import LTAAAgent
+        ltaa_agent = LTAAAgent()
+        results = ltaa_agent.analyze_disease(indication, target_trial_id=trial_id)
+        target_count = len(results.get('ranked_targets', []))
+        logger.info(f"✅ [BACKGROUND] LTAA completed for '{indication}': {target_count} targets found")
+    except Exception as e:
+        logger.error(f"❌ [BACKGROUND] LTAA failed for '{indication}': {e}")
+        import traceback
+        traceback.print_exc()
+
+def run_insilico_analysis(trial_id: str, text: str):
+    """
+    Background task to run In Silico modeling (Toxicity, DDI, PK/PD).
+    """
+    try:
+        logger.info(f"🧪 [BACKGROUND] Starting In Silico analysis for trial: {trial_id}")
+        from backend.agents.insilico.drug_extraction_agent import DrugExtractionAgent
+        from backend.agents.insilico.chemical_resolver import ChemicalResolver
+        from backend.agents.insilico.toxicity_agent import ToxicityAgent
+        from backend.agents.insilico.ddi_agent import DDIAgent
+        import pickle
+        from pathlib import Path
+
+        # 1. Extract
+        extractor = DrugExtractionAgent()
+        drug_data = extractor.extract_drug_data(text)
+        
+        # 2. Model - Deep Molecular Analysis
+        from backend.agents.insilico.molecular_target_agent import MolecularTargetAgent
+        resolver = ChemicalResolver()
+        tox_agent = ToxicityAgent()
+        ddi_agent = DDIAgent()
+        target_agent = MolecularTargetAgent()
+        
+        target_analysis = target_agent.analyze_text(text)
+        
+        results = []
+        for drug in drug_data.get("trial_drugs", []):
+            chem = resolver.resolve_name(drug['name'])
+            tox = None
+            if chem and chem.get('smiles'): # Add check for smiles
+                tox = tox_agent.predict_toxicity(chem['smiles'])
+            results.append({"drug": drug, "chem": chem, "tox": tox})
+            
+        interactions = ddi_agent.analyze_concomitants(
+            [d['name'] for d in drug_data.get("trial_drugs", [])],
+            drug_data.get("prohibited_meds", [])
+        )
+        
+        # 3. PK Simulation (for the first drug)
+        from backend.agents.insilico.pkpd_simulator import PKPDSimulator
+        pkpd_sim = PKPDSimulator()
+        simulation = None
+        if drug_data.get("trial_drugs"):
+            def safe_float(val, default):
+                try:
+                    if isinstance(val, (int, float)): return float(val)
+                    import re
+                    nums = re.findall(r"[-+]?\d*\.\d+|\d+", str(val))
+                    return float(nums[0]) if nums else float(default)
+                except:
+                    return float(default)
+
+            first_drug = drug_data["trial_drugs"][0]
+            simulation = pkpd_sim.simulate_1_compartment(
+                dose_mg=safe_float(first_drug.get("dose"), 100),
+                dose_interval_hr=24, # Daily
+                num_doses=7
+            )
+
+        # 4. Cache results - Include Target Analysis
+        cache_dir = Path("/app/data/insilico_cache")
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        cache_path = cache_dir / f"{trial_id}.pkl"
+        
+        with open(cache_path, "wb") as f:
+            pickle.dump({
+                "drugs": results, 
+                "interactions": interactions,
+                "simulation": simulation,
+                "target_analysis": target_analysis
+            }, f)
+            
+        logger.info(f"✅ [BACKGROUND] In Silico completed for '{trial_id}'")
+    except Exception as e:
+        logger.error(f"❌ [BACKGROUND] In Silico failed for '{trial_id}': {e}")
+        import traceback
+        traceback.print_exc()
 
 def extract_pdf_text(file_path: str) -> str:
-    """Extract text from PDF file"""
+    """Extract text from PDF file with OCR fallback"""
     import pdfplumber
     text = ""
     try:
@@ -54,6 +163,13 @@ def extract_pdf_text(file_path: str) -> str:
                 extracted = page.extract_text()
                 if extracted:
                     text += extracted + "\n"
+        
+        # OCR Fallback
+        ocr_proc = get_ocr_processor()
+        if ocr_proc and ocr_proc.is_ocr_needed(text):
+            print(f"🕵️  OCR Needed for {file_path}. Starting fallback...")
+            text = ocr_proc.extract_text_from_pdf(file_path)
+            
         return text if text.strip() else "Empty PDF content - could not extract text"
     except Exception as e:
         print(f"❌ PDF extraction error: {e}")
@@ -61,7 +177,7 @@ def extract_pdf_text(file_path: str) -> str:
 
 
 @router.post("/upload")
-async def upload_protocol(file: UploadFile = File(...)):
+async def upload_protocol(file: UploadFile = File(...), background_tasks: BackgroundTasks = None):
     """Upload a clinical trial protocol PDF and extract criteria + FDA forms"""
     if not file.filename.endswith('.pdf'):
         raise HTTPException(status_code=400, detail="Only PDF files are supported")
@@ -212,6 +328,17 @@ async def upload_protocol(file: UploadFile = File(...)):
                 "glossary_terms": len(extracted_glossary)
             }
             
+            # Queue Background LTAA Analysis (Research Intelligence)
+            indication = new_trial.indication
+            if indication and indication != "Unknown" and background_tasks:
+                background_tasks.add_task(run_ltaa_analysis, indication, new_trial.trial_id)
+                logger.info(f"🔄 Queued background LTAA analysis for: {indication}")
+            
+            # Queue In Silico Analysis
+            if text and background_tasks:
+                background_tasks.add_task(run_insilico_analysis, new_trial.trial_id, text)
+                logger.info(f"🧪 Queued background In Silico analysis for trial: {new_trial.trial_id}")
+
             db.close()
             return result_data
         

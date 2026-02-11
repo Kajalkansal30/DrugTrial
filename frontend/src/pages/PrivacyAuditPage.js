@@ -9,7 +9,8 @@ import {
     CompareArrows, Visibility, VisibilityOff, Refresh
 } from '@mui/icons-material';
 
-const API_BASE = 'http://localhost:8201/api';
+const API_URL = process.env.REACT_APP_API_URL || '';
+const API_BASE = `${API_URL}/api`;
 
 const PrivacyAuditPage = () => {
     const [summary, setSummary] = useState(null);

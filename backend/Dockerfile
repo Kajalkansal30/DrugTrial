@@ -10,6 +10,9 @@ RUN apt-get update && apt-get install -y \
     zstd \
     python3-dev \
     build-essential \
+    tesseract-ocr \
+    libtesseract-dev \
+    poppler-utils \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Ollama

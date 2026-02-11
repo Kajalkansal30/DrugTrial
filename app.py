@@ -23,7 +23,7 @@ import sys
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from backend.routers import fda_router, trials, audit_router, privacy_router
+from backend.routers import fda_router, trials, audit_router, privacy_router, ltaa_router, insilico_router
 from backend.utils.auditor import Auditor
 
 app = FastAPI(
@@ -35,7 +35,12 @@ app = FastAPI(
 # CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://localhost", "http://127.0.0.1:3000", "*"],
+    allow_origins=[
+        "http://localhost:3000", 
+        "http://localhost", 
+        "http://127.0.0.1:3000", 
+        "https://ai.veersalabs.com"
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -46,6 +51,8 @@ app.include_router(fda_router.router, prefix="/api/fda", tags=["FDA Forms"])
 app.include_router(audit_router.router)
 app.include_router(privacy_router.router)
 app.include_router(trials.router) # trials.py already has prefix /api/trials
+app.include_router(ltaa_router.router)
+app.include_router(insilico_router.router)
 
 # Pydantic Models
 class PatientResponse(BaseModel):

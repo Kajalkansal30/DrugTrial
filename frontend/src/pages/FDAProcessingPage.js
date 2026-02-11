@@ -1,7 +1,21 @@
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
 import { useParams, useNavigate } from 'react-router-dom';
-import { CircularProgress, Typography } from '@mui/material';
+import {
+    CircularProgress,
+    Typography,
+    Box,
+    Chip,
+    Accordion,
+    AccordionSummary,
+    AccordionDetails,
+    Tooltip
+} from '@mui/material';
+import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
+import VerifiedUserIcon from '@mui/icons-material/VerifiedUser';
+import WarningIcon from '@mui/icons-material/Warning';
+import DomainVerificationIcon from '@mui/icons-material/DomainVerification';
+import InSilicoDashboard from '../components/InSilicoDashboard';
 import './FDAProcessingPage.css';
 
 const API_BASE = process.env.REACT_APP_API_URL || '';
@@ -332,6 +346,8 @@ function FDAFormViewer({ document, onClose, isWizard, onContinue, continuing }) 
     const [localStatus, setLocalStatus] = useState(document.document.status);
     const [localSignedBy, setLocalSignedBy] = useState(document.document.signed_by);
     const [localReviewedBy, setLocalReviewedBy] = useState(document.document.reviewed_by);
+    const [intelData, setIntelData] = useState(null);
+    const [loadingIntel, setLoadingIntel] = useState(false);
 
     const isEditable = localStatus === 'extracted';
     // Allow re-review if needed? Usually only if extracted.
@@ -379,6 +395,27 @@ function FDAFormViewer({ document, onClose, isWizard, onContinue, continuing }) 
             alert('Review failed: ' + (error.response?.data?.detail || error.message));
         }
     };
+
+    const fetchIntel = async () => {
+        const disease = formData['1571'].indication;
+        if (!disease || disease === "Unknown") return;
+
+        setLoadingIntel(true);
+        try {
+            const response = await axios.get(`${API_BASE}/api/ltaa/report/${encodeURIComponent(disease)}`);
+            setIntelData(response.data);
+        } catch (error) {
+            console.error("Error fetching Research Intel:", error);
+        } finally {
+            setLoadingIntel(false);
+        }
+    };
+
+    useEffect(() => {
+        if (activeTab === 'Intel' && !intelData) {
+            fetchIntel();
+        }
+    }, [activeTab]);
 
     const handleSign = async (signatureData) => {
         try {
@@ -451,10 +488,24 @@ function FDAFormViewer({ document, onClose, isWizard, onContinue, continuing }) 
                 >
                     FDA Form 1572 (Investigator)
                 </button>
+                <button
+                    className={activeTab === 'Intel' ? 'active' : ''}
+                    onClick={() => setActiveTab('Intel')}
+                    style={{ background: '#e3f2fd', color: '#1565c0', fontWeight: 'bold' }}
+                >
+                    🧬 Research Intelligence (AI)
+                </button>
+                <button
+                    className={activeTab === 'InSilico' ? 'active' : ''}
+                    onClick={() => setActiveTab('InSilico')}
+                    style={{ background: '#f0f4f8', color: '#24292e', fontWeight: 'bold' }}
+                >
+                    🧪 In Silico Modeling (NEW)
+                </button>
             </div>
 
             <div className="form-content">
-                {activeTab === '1571' && (
+                <div style={{ display: activeTab === '1571' ? 'block' : 'none' }}>
                     <div className="form-section">
                         <h3>Drug Information</h3>
                         {renderField('Drug Name', 'drug_name', formData['1571'].drug_name, '1571')}
@@ -474,9 +525,9 @@ function FDAFormViewer({ document, onClose, isWizard, onContinue, continuing }) 
                         {renderField('Contact Phone', 'contact_phone', formData['1571'].contact_phone, '1571')}
                         {renderField('Contact Email', 'contact_email', formData['1571'].contact_email, '1571')}
                     </div>
-                )}
+                </div>
 
-                {activeTab === '1572' && (
+                <div style={{ display: activeTab === '1572' ? 'block' : 'none' }}>
                     <div className="form-section">
                         <h3>Protocol Identification</h3>
                         {renderField('Protocol Title', 'protocol_title', formData['1572'].protocol_title, '1572')}
@@ -492,7 +543,185 @@ function FDAFormViewer({ document, onClose, isWizard, onContinue, continuing }) 
                         {renderField('IRB Name', 'irb_name', formData['1572'].irb_name, '1572')}
                         {renderField('IRB Address', 'irb_address', formData['1572'].irb_address, '1572')}
                     </div>
-                )}
+                </div>
+
+                <div style={{ display: activeTab === 'Intel' ? 'block' : 'none' }}>
+                    <div className="form-section intel-section">
+                        {loadingIntel ? (
+                            <div className="intel-loading">
+                                <CircularProgress size={30} />
+                                <Typography sx={{ mt: 2 }}>Analyzing Literature & Targets for <strong>{formData['1571'].indication}</strong>...</Typography>
+                            </div>
+                        ) : intelData ? (
+                            <div className="intel-results">
+                                {/* Analysis Header & Status */}
+                                <div className="intel-header" style={{ marginBottom: '20px' }}>
+                                    {intelData.status === 'analyzing' && (
+                                        <div style={{ padding: '15px', backgroundColor: '#e3f2fd', borderRadius: '8px', marginBottom: '15px', display: 'flex', alignItems: 'center' }}>
+                                            <CircularProgress size={20} sx={{ mr: 2 }} />
+                                            <Typography variant="body2">
+                                                <strong>Analysis in Progress:</strong> The agent is currently reading research papers.
+                                                Please check back in 30-60 seconds.
+                                            </Typography>
+                                        </div>
+                                    )}
+
+                                    {/* Domain & Context Badges */}
+                                    <Box sx={{ mb: 2, display: 'flex', flexWrap: 'wrap', gap: 1 }}>
+                                        <Chip
+                                            icon={<DomainVerificationIcon />}
+                                            label={intelData.domain ? `Domain: ${intelData.domain.toUpperCase()}` : 'General Domain'}
+                                            color="primary"
+                                            variant="filled"
+                                        />
+                                        {intelData.stats?.document_types?.map((type, idx) => (
+                                            <Chip
+                                                key={idx}
+                                                label={type.replace('_', ' ').toUpperCase()}
+                                                variant="outlined"
+                                                size="small"
+                                            />
+                                        ))}
+                                    </Box>
+
+                                    {/* Scientific Summary */}
+                                    <div className="intel-report-summary">
+                                        <h3>Scientific Justification</h3>
+                                        <p>{intelData.report.summary}</p>
+                                    </div>
+
+                                    {/* Excluded Entities Accordion */}
+                                    {intelData.excluded_entities && intelData.excluded_entities.total_excluded > 0 && (
+                                        <Accordion variant="outlined" sx={{ mt: 2, mb: 3, borderColor: 'warning.light', '&:before': { display: 'none' } }}>
+                                            <AccordionSummary expandIcon={<ExpandMoreIcon />}>
+                                                <Box sx={{ display: 'flex', alignItems: 'center' }}>
+                                                    <WarningIcon color="warning" fontSize="small" sx={{ mr: 1 }} />
+                                                    <Typography variant="body2" color="text.secondary">
+                                                        Filtered {intelData.excluded_entities.total_excluded} Non-Target Entities (Quality Control)
+                                                    </Typography>
+                                                </Box>
+                                            </AccordionSummary>
+                                            <AccordionDetails>
+                                                <Typography variant="caption" display="block" sx={{ mb: 1, fontWeight: 'bold' }}>
+                                                    Top Filtered Terms (Validation Failed):
+                                                </Typography>
+                                                <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.5 }}>
+                                                    {intelData.excluded_entities.top_excluded.slice(0, 10).map((item, idx) => (
+                                                        <Tooltip key={idx} title={`Reason: ${item.reason}`}>
+                                                            <Chip
+                                                                label={`${item.entity} (${item.count})`}
+                                                                size="small"
+                                                                color="default"
+                                                                variant="outlined"
+                                                                sx={{ bgcolor: '#fafafa' }}
+                                                            />
+                                                        </Tooltip>
+                                                    ))}
+                                                </Box>
+                                            </AccordionDetails>
+                                        </Accordion>
+                                    )}
+                                </div>
+
+                                {/* Targets Table */}
+                                <div className="intel-targets-list">
+                                    <h3>Discovered Biological Targets</h3>
+                                    <table className="intel-table">
+                                        <thead>
+                                            <tr>
+                                                <th>Target/Gene</th>
+                                                <th>Type</th>
+                                                <th>Validation</th>
+                                                <th>Score</th>
+                                                <th>Top Citations</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {intelData.targets?.slice(0, 10).map((t, idx) => (
+                                                <tr key={idx}>
+                                                    <td className="target-name">
+                                                        <div style={{ fontWeight: 'bold' }}>{t.name}</div>
+                                                        {t.validation_source && (
+                                                            <div style={{ fontSize: '0.75rem', color: '#666' }}>
+                                                                {t.validation_source}: {t.validation_id || 'N/A'}
+                                                            </div>
+                                                        )}
+                                                    </td>
+                                                    <td>
+                                                        <span className={`type-tag ${t.type?.toLowerCase().replace('/', '')}`}>
+                                                            {t.type}
+                                                        </span>
+                                                    </td>
+                                                    <td>
+                                                        {t.validation_source ? (
+                                                            <Tooltip title={`Validated via ${t.validation_source}`}>
+                                                                <Chip
+                                                                    icon={<VerifiedUserIcon style={{ fontSize: 14 }} />}
+                                                                    label="Verified"
+                                                                    size="small"
+                                                                    color="success"
+                                                                    variant="outlined"
+                                                                    style={{ height: 24, fontSize: '0.75rem' }}
+                                                                />
+                                                            </Tooltip>
+                                                        ) : (
+                                                            <Chip label="Unverified" size="small" variant="outlined" style={{ height: 24, fontSize: '0.75rem' }} />
+                                                        )}
+                                                    </td>
+                                                    <td className="score-cell">
+                                                        <div style={{ display: 'flex', alignItems: 'center' }}>
+                                                            <span style={{ marginRight: '8px' }}>{Number(t.score).toFixed(1)}</span>
+                                                            <div style={{ width: '50px', height: '6px', background: '#eee', borderRadius: '3px' }}>
+                                                                <div style={{ width: `${Math.min(t.score * 10, 100)}%`, height: '100%', background: '#1976d2', borderRadius: '3px' }}></div>
+                                                            </div>
+                                                        </div>
+                                                    </td>
+                                                    <td className="citation-cell">
+                                                        {t.citations?.slice(0, 2).map((c, cidx) => (
+                                                            <div key={cidx} className="citation-snippet">
+                                                                <small>
+                                                                    {c.source.startsWith('http') ? '🌐 PubMed' : '📄 ' + c.source}
+                                                                    {c.page > 0 && ` (Page ${c.page})`}
+                                                                </small>
+                                                                <p>"{c.context?.substring(0, 100)}..."</p>
+                                                            </div>
+                                                        ))}
+                                                    </td>
+                                                </tr>
+                                            ))}
+                                            {(!intelData.targets || intelData.targets.length === 0) && (
+                                                <tr>
+                                                    <td colSpan="5" style={{ textAlign: 'center', padding: '20px', color: '#888' }}>
+                                                        No high-confidence targets found yet.
+                                                    </td>
+                                                </tr>
+                                            )}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        ) : (
+                            <div className="intel-empty">
+                                <Typography gutterBottom>
+                                    No research intelligence available for indication: <strong>{formData['1571'].indication || "Unknown"}</strong>
+                                </Typography>
+                                <Typography variant="caption" display="block" color="textSecondary" sx={{ mb: 2 }}>
+                                    Ensure the Indication field in FDA Form 1571 is correctly filled.
+                                </Typography>
+                                <button onClick={fetchIntel} className="action-button">Retry Analysis</button>
+                            </div>
+                        )}
+                    </div>
+                </div>
+
+                <div style={{ display: activeTab === 'InSilico' ? 'block' : 'none' }}>
+                    <div className="form-section">
+                        <InSilicoDashboard
+                            trialId={document.document.id}
+                            indication={formData['1571'].indication}
+                        />
+                    </div>
+                </div>
             </div>
 
             <div className="form-actions">

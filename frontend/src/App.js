@@ -9,7 +9,7 @@ import {
 import {
     Container, AppBar, Toolbar, Typography, Box, Button, CssBaseline
 } from '@mui/material';
-import { Home, Psychology, Security, AdminPanelSettings } from '@mui/icons-material';
+import { Home, Psychology, Security, AdminPanelSettings, Science } from '@mui/icons-material';
 
 import WorkflowStepper from './components/WorkflowStepper';
 import UploadPage from './pages/UploadPage';

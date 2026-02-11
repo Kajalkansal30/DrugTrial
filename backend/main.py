@@ -20,6 +20,7 @@ import sys
 
 from backend.routers import trials
 from backend.routers import fda_router
+from backend.routers import insilico_router
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -31,6 +32,7 @@ app = FastAPI(
 # Include routers
 app.include_router(trials.router)
 app.include_router(fda_router.router, prefix="/api/fda", tags=["FDA Forms"])
+app.include_router(insilico_router.router)
 
 # CORS middleware
 app.add_middleware(
