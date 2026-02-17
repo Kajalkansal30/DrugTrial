@@ -15,11 +15,22 @@ import json
 from sqlalchemy.orm import Session
 
 # Import from project root
-from backend.db_models import get_session, FDADocument, FDAForm1571, FDAForm1572
+from backend.db_models import get_session, FDADocument, FDAForm1571, FDAForm1572, ClinicalTrial, EligibilityCriteria
 from backend.agents.fda_processor import FDAProcessor
 from backend.utils.auditor import Auditor
 
 router = APIRouter()
+
+# Singleton FDAProcessor to avoid re-loading NLP models per request
+_fda_processor = None
+
+def _get_fda_processor():
+    global _fda_processor
+    if _fda_processor is None:
+        print("⏳ Initializing FDAProcessor singleton...")
+        _fda_processor = FDAProcessor()
+        print("✅ FDAProcessor singleton ready")
+    return _fda_processor
 
 # Pydantic models
 class FormUpdateRequest(BaseModel):
@@ -66,8 +77,8 @@ async def upload_and_process_pdf(
     from fastapi.responses import StreamingResponse
     import json
     
-    # Create global or request-scoped processor once
-    processor = FDAProcessor()
+    # Use singleton processor to avoid re-loading NLP models
+    processor = _get_fda_processor()
     
     async def process_stream():
         try:
@@ -93,6 +104,7 @@ async def upload_and_process_pdf(
             
             import queue
             import threading
+            import time as _time
             
             q = queue.Queue()
             result_container = {}
@@ -113,18 +125,24 @@ async def upload_and_process_pdf(
             t = threading.Thread(target=worker)
             t.start()
             
+            last_yield_time = _time.time()
+            
             while True:
-                # Non-blocking check or short timeout
                 try:
-                    item = q.get(timeout=0.1)
+                    item = q.get(timeout=0.5)
                     if item is None:
                         break
                     yield json.dumps(item) + "\n"
+                    last_yield_time = _time.time()
                 except queue.Empty:
                     if not t.is_alive():
                         break
+                    # Send keepalive ping every 5s to prevent proxy timeout
+                    if _time.time() - last_yield_time > 5:
+                        yield json.dumps({"type": "log", "message": "⏳ Processing..."}) + "\n"
+                        last_yield_time = _time.time()
                     import asyncio
-                    await asyncio.sleep(0.01)
+                    await asyncio.sleep(0.05)
             
             t.join()
             
@@ -191,23 +209,122 @@ async def upload_and_process_pdf(
             session.add(form_1572)
             session.commit()
             
-            # 3. Trigger Background Analysis
-            indication = result.get('fda_1571', {}).get('indication')
-            if indication and indication != "Unknown":
-                from backend.routers.trials import run_ltaa_analysis
-                background_tasks.add_task(run_ltaa_analysis, indication, str(doc.id)) 
-                yield json.dumps({"type": "log", "message": f"📊 Triggering Research Intelligence for: {indication}..."}) + "\n"
-                
-            from backend.routers.trials import run_insilico_analysis, extract_pdf_text
-            yield json.dumps({"type": "log", "message": "🧪 Triggering Deep In Silico scan in background..."}) + "\n"
-            
-            full_text = extract_pdf_text(file_path)
-            background_tasks.add_task(run_insilico_analysis, doc.id, full_text)
-            
+            # --- Auto-create ClinicalTrial ---
+            yield json.dumps({"type": "log", "message": "🔬 Creating clinical trial record..."}) + "\n"
+
+            full_text = getattr(processor, '_last_full_text', '') or ''
+            if not full_text:
+                import pdfplumber
+                try:
+                    with pdfplumber.open(file_path) as pdf:
+                        full_text = "\n".join(p.extract_text() or "" for p in pdf.pages)
+                except Exception:
+                    full_text = ""
+
+            protocol_title = form_1571_data.get('protocol_title') or file.filename.replace('.pdf', '')
+            phase = form_1571_data.get('study_phase') or "Unknown"
+            drug_name_val = form_1571_data.get('drug_name') or "Unknown"
+            indication_val = form_1571_data.get('indication') or "Unknown"
+
+            import uuid
+            trial_uid = f"TRIAL_{doc.filename[:4]}_{uuid.uuid4().hex[:4]}".replace(" ", "_").upper()
+
+            def model_to_dict_for_trial(model):
+                if not model: return {}
+                data = {}
+                for c in model.__table__.columns:
+                    if c.name == 'document': continue
+                    val = getattr(model, c.name)
+                    if isinstance(val, (datetime, date)):
+                        val = val.isoformat()
+                    data[c.name] = val
+                return data
+
+            new_trial = ClinicalTrial(
+                trial_id=trial_uid,
+                protocol_title=protocol_title,
+                phase=phase,
+                indication=indication_val,
+                drug_name=drug_name_val,
+                status="Criteria Extracted",
+                document_id=doc.id,
+                fda_1571=model_to_dict_for_trial(form_1571),
+                fda_1572=model_to_dict_for_trial(form_1572),
+                analysis_status="pending"
+            )
+            session.add(new_trial)
+            session.commit()
+            session.refresh(new_trial)
+
+            yield json.dumps({"type": "log", "message": f"📋 Trial {trial_uid} created"}) + "\n"
+
+            # Audit: Trial created
+            auditor.log(
+                action="Trial Created from Upload",
+                agent="FDAProcessor",
+                target_type="trial",
+                target_id=new_trial.trial_id,
+                status="Success",
+                details={"document_id": doc.id, "indication": indication_val, "drug": drug_name_val, "phase": phase},
+            )
+
+            # --- Extract Eligibility Criteria ---
+            yield json.dumps({"type": "log", "message": "🤖 Extracting eligibility criteria..."}) + "\n"
+
+            criteria_count = 0
+            nlp_agent = get_nlp_agent()
+            if nlp_agent and full_text:
+                criteria = nlp_agent.extract_rules(full_text)
+                for c_type in ['inclusion', 'exclusion']:
+                    for c_data in criteria.get(c_type, []):
+                        text_to_save = c_data.get('source_text') or c_data.get('text', '')
+                        if not text_to_save or len(text_to_save.strip()) < 5:
+                            continue
+                        session.add(EligibilityCriteria(
+                            trial_id=new_trial.id,
+                            criterion_type=c_type,
+                            text=text_to_save,
+                            category=c_data.get('rule_type', 'unclassified'),
+                            operator=c_data.get('operator'),
+                            value=str(c_data.get('value')) if c_data.get('value') is not None else None,
+                            unit=c_data.get('unit'),
+                            negated=c_data.get('negated', False),
+                            structured_data=c_data
+                        ))
+                        criteria_count += 1
+                session.commit()
+
+            # Audit: Criteria extracted
+            auditor.log(
+                action="Eligibility Criteria Extracted",
+                agent="ProtocolRuleAgent",
+                target_type="trial",
+                target_id=new_trial.trial_id,
+                status="Success",
+                details={"criteria_count": criteria_count},
+            )
+
+            yield json.dumps({"type": "log", "message": f"✅ {criteria_count} criteria extracted"}) + "\n"
+
+            # --- Publish TRIAL_CREATED for Orchestrator (LTAA + InSilico) ---
+            from backend.events import event_bus
+            trial_event = {
+                "trial_id": new_trial.trial_id,
+                "title": protocol_title,
+                "disease": indication_val,
+                "drug_name": drug_name_val,
+                "phase": phase,
+                "full_text": full_text,
+            }
+            background_tasks.add_task(event_bus.publish, "TRIAL_CREATED", trial_event)
+            yield json.dumps({"type": "log", "message": "🚀 LTAA + InSilico analysis queued"}) + "\n"
+
             # 3. Final Response
             final_response = {
                 "success": True,
                 "document_id": doc.id,
+                "trial_id": new_trial.trial_id,
+                "trial_db_id": new_trial.id,
                 "filename": file.filename,
                 "status": "extracted",
                 "validation": result['validation'],
@@ -232,7 +349,15 @@ async def upload_and_process_pdf(
         finally:
             session.close()
 
-    return StreamingResponse(process_stream(), media_type="application/x-ndjson")
+    return StreamingResponse(
+        process_stream(),
+        media_type="application/x-ndjson",
+        headers={
+            "X-Accel-Buffering": "no",        # Disable nginx buffering
+            "Cache-Control": "no-cache",        # Prevent caching of stream
+            "Transfer-Encoding": "chunked",
+        }
+    )
 
 
 @router.get("/documents")
@@ -284,6 +409,21 @@ async def get_forms(document_id: int, session: Session = Depends(get_session)):
                 return {}
             return {c.name: getattr(model, c.name) for c in model.__table__.columns}
         
+        # Look up associated trial for context
+        trial = session.query(ClinicalTrial).filter_by(document_id=document_id).first()
+        trial_context = None
+        if trial:
+            trial_context = {
+                "trial_id": trial.trial_id,
+                "db_id": trial.id,
+                "status": trial.status,
+                "indication": trial.indication,
+                "drug_name": trial.drug_name,
+                "has_ltaa": bool(trial.analysis_results and trial.analysis_results.get('ltaa')),
+                "has_insilico": bool(trial.analysis_results and trial.analysis_results.get('insilico')),
+                "analysis_status": trial.analysis_status or "pending",
+            }
+        
         return {
             "document": {
                 "id": doc.id,
@@ -297,7 +437,8 @@ async def get_forms(document_id: int, session: Session = Depends(get_session)):
                 "signature_data": json.loads(doc.signature_data) if doc.signature_data else None
             },
             "fda_1571": model_to_dict(form_1571),
-            "fda_1572": model_to_dict(form_1572)
+            "fda_1572": model_to_dict(form_1572),
+            "trial": trial_context
         }
     finally:
         session.close()
@@ -372,6 +513,15 @@ async def mark_as_reviewed(
         if not doc:
             raise HTTPException(status_code=404, detail="Document not found")
         
+        if doc.status == 'reviewed' or doc.status == 'signed':
+            return {
+                "success": True,
+                "message": "Document is already reviewed",
+                "status": doc.status,
+                "reviewed_at": doc.reviewed_at.isoformat() if doc.reviewed_at else None,
+                "reviewed_by": doc.reviewed_by
+            }
+            
         if doc.status != 'extracted':
             raise HTTPException(
                 status_code=400,
@@ -416,6 +566,16 @@ async def sign_document(
         if not doc:
             raise HTTPException(status_code=404, detail="Document not found")
         
+        if doc.status == 'signed':
+            return {
+                "success": True,
+                "message": "Document is already signed",
+                "status": "signed",
+                "signed_at": doc.signed_at.isoformat() if doc.signed_at else None,
+                "signed_by": doc.signed_by,
+                "signature": json.loads(doc.signature_data) if doc.signature_data else None
+            }
+            
         if doc.status != 'reviewed':
             raise HTTPException(
                 status_code=400,
@@ -628,29 +788,25 @@ async def create_trial_from_document(
         )
         
         # 3. Trigger Criteria Extraction
-        # Re-read PDF text
-        import pdfplumber
-        text = ""
-        possible_paths = [
-            os.path.join("/app/uploads/fda_documents", doc.filename),
-            os.path.join("uploads", "fda_documents", doc.filename),
-            os.path.join(os.getcwd(), "uploads", "fda_documents", doc.filename)
-        ]
+        # Try to reuse cached text from FDAProcessor, fallback to re-read
+        processor = _get_fda_processor()
+        text = getattr(processor, '_last_full_text', '') or ''
         
-        file_path = None
-        for p in possible_paths:
-            if os.path.exists(p):
-                file_path = p
-                break
-        
-        if file_path:
-            try:
-                with pdfplumber.open(file_path) as pdf:
-                    for page in pdf.pages:
-                        extracted = page.extract_text()
-                        if extracted: text += extracted + "\n"
-            except Exception as e:
-                print(f"Error re-reading PDF: {e}")
+        if not text:
+            import pdfplumber
+            possible_paths = [
+                os.path.join("/app/uploads/fda_documents", doc.filename),
+                os.path.join("uploads", "fda_documents", doc.filename),
+                os.path.join(os.getcwd(), "uploads", "fda_documents", doc.filename)
+            ]
+            for p in possible_paths:
+                if os.path.exists(p):
+                    try:
+                        with pdfplumber.open(p) as pdf:
+                            text = "\n".join(page.extract_text() or "" for page in pdf.pages)
+                    except Exception as e:
+                        print(f"Error re-reading PDF: {e}")
+                    break
         
         agent = get_nlp_agent()
         criteria = {"inclusion": [], "exclusion": []}
@@ -691,21 +847,28 @@ async def create_trial_from_document(
             
             session.commit()
             
-            # 4. Queue Background LTAA Analysis (Research Intelligence)
-            if indication and indication != "Unknown":
-                try:
-                    from backend.routers.trials import run_ltaa_analysis
-                    background_tasks.add_task(run_ltaa_analysis, indication, new_trial.trial_id)
-                    print(f"🔄 Queued background LTAA analysis for: {indication}")
-                except Exception as e:
-                    print(f"⚠️ Failed to queue LTAA analysis: {e}")
+            # 4. Publish TRIAL_CREATED event -- Orchestrator handles LTAA + InSilico
+            try:
+                from backend.events import event_bus
+                trial_event = {
+                    "trial_id": new_trial.trial_id,
+                    "title": new_trial.protocol_title,
+                    "disease": indication,
+                    "phase": phase,
+                    "drug_name": drug_name,
+                    "full_text": text,
+                }
+                background_tasks.add_task(event_bus.publish, "TRIAL_CREATED", trial_event)
+                print(f"📡 Published TRIAL_CREATED for {new_trial.trial_id} via Orchestrator")
+            except Exception as e:
+                print(f"⚠️ Failed to publish TRIAL_CREATED event: {e}")
 
-            return {
-                "success": True,
-                "trial_id": new_trial.trial_id,
-                "db_id": new_trial.id,
-                "message": "Trial created and criteria extracted"
-            }
+        return {
+            "success": True,
+            "trial_id": new_trial.trial_id,
+            "db_id": new_trial.id,
+            "message": "Trial created and criteria extracted"
+        }
         
     except Exception as e:
         session.rollback()

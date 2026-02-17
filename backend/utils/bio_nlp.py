@@ -6,31 +6,27 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# Global NLP model (Lazy loaded)
-_nlp = None
 
 def get_nlp():
-    global _nlp
-    if _nlp is None:
-        logger.info("Loading SciSpaCy model (en_core_sci_lg)...")
-        _nlp = spacy.load("en_core_sci_lg")
-        # Add entity linker (UMLS)
-        # Note: This is memory intensive. Ensure backend has ~8GiB RAM.
-        _nlp.add_pipe("scispacy_linker", config={"linker_name": "umls"})
-    return _nlp
+    """Get the shared en_core_sci_lg model with UMLS linker from nlp_utils."""
+    from backend.nlp_utils import get_nlp as _get_shared_nlp
+    return _get_shared_nlp("en_core_sci_lg", load_linker=True)
+
 
 def extract_bio_entities(text: str) -> List[Dict[str, Any]]:
     """
     Extract biological entities (Proteins, Genes, Diseases, Chemicals) from text.
+    Uses the shared NLP model with UMLS EntityLinker.
     """
     try:
         nlp = get_nlp()
         doc = nlp(text)
-        linker = nlp.get_pipe("scispacy_linker")
+
+        has_linker = "scispacy_linker" in nlp.pipe_names
+        linker = nlp.get_pipe("scispacy_linker") if has_linker else None
         
         entities = []
         for ent in doc.ents:
-            # Basic metadata
             entity_info = {
                 "text": ent.text,
                 "label": ent.label_,
@@ -40,16 +36,14 @@ def extract_bio_entities(text: str) -> List[Dict[str, Any]]:
                 "canonical_name": None
             }
             
-            # Entity Linking (UMLS)
-            if ent._.kb_ents:
-                # Top match
+            if has_linker and ent._.kb_ents:
                 best_match_id, score = ent._.kb_ents[0]
                 kb_entry = linker.kb.cui_to_entity[best_match_id]
                 entity_info["umls_id"] = best_match_id
                 entity_info["canonical_name"] = kb_entry.canonical_name
                 entity_info["types"] = kb_entry.types
             else:
-                 entity_info["types"] = []
+                entity_info["types"] = []
                 
             entities.append(entity_info)
             

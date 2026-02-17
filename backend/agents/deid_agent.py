@@ -3,7 +3,6 @@ import hashlib
 import json
 from datetime import datetime
 from typing import Dict, Any, List, Optional
-import spacy
 
 class DeIDAgent:
     """
@@ -11,12 +10,14 @@ class DeIDAgent:
     Supports pseudonymization, generalization, and masking.
     """
     
-    def __init__(self, model_name="en_core_web_sm"):
-        try:
-            self.nlp = spacy.load(model_name)
-        except:
-            # Fallback if model not installed in specific env
-            self.nlp = None
+    def __init__(self, model_name="en_core_web_sm", load_nlp=True):
+        self.nlp = None
+        if load_nlp:
+            try:
+                import spacy
+                self.nlp = spacy.load(model_name)
+            except Exception:
+                self.nlp = None
             
         self.patterns = {
             "ssn": r"\b\d{3}-\d{2}-\d{4}\b",

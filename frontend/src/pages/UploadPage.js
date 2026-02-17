@@ -31,10 +31,9 @@ const UploadPage = ({ onUploadSuccess }) => {
 
         const formData = new FormData();
         formData.append('file', file);
+        const API_URL = process.env.REACT_APP_API_URL || '';
 
         try {
-            const API_URL = process.env.REACT_APP_API_URL || '';
-            // Use fetch instead of axios for streaming support
             const response = await fetch(`${API_URL}/api/fda/upload`, {
                 method: 'POST',
                 body: formData,
@@ -48,6 +47,7 @@ const UploadPage = ({ onUploadSuccess }) => {
             const reader = response.body.getReader();
             const decoder = new TextDecoder();
             let buffer = '';
+            let gotResult = false;
 
             while (true) {
                 const { done, value } = await reader.read();
@@ -55,36 +55,66 @@ const UploadPage = ({ onUploadSuccess }) => {
 
                 buffer += decoder.decode(value, { stream: true });
                 const lines = buffer.split('\n');
-
-                // Process all complete lines
                 buffer = lines.pop();
 
                 for (const line of lines) {
                     if (!line.trim()) continue;
+                    let data;
                     try {
-                        const data = JSON.parse(line);
+                        data = JSON.parse(line);
+                    } catch (parseErr) {
+                        console.warn("Skipping unparseable stream line:", line);
+                        continue;
+                    }
 
-                        if (data.type === 'log') {
-                            setLogs(prev => [...prev, data.message]);
-                        } else if (data.type === 'result') {
-                            setLogs(prev => [...prev, "✅ Upload complete! Redirecting..."]);
-                            if (onUploadSuccess) onUploadSuccess(data.payload);
-
-                            // Valid redirection
-                            setTimeout(() => {
-                                navigate(`/process-fda/${data.payload.document_id}`);
-                            }, 1000);
-                            return;
-                        } else if (data.type === 'error') {
-                            throw new Error(data.message);
-                        }
-                    } catch (e) {
-                        console.error("Error parsing stream line:", line, e);
+                    if (data.type === 'log') {
+                        setLogs(prev => [...prev, data.message]);
+                    } else if (data.type === 'result') {
+                        gotResult = true;
+                        setLogs(prev => [...prev, "✅ Upload complete! Redirecting..."]);
+                        if (onUploadSuccess) onUploadSuccess(data.payload);
+                        setTimeout(() => {
+                            navigate(`/process-fda/${data.payload.document_id}`);
+                        }, 1000);
+                        return;
+                    } else if (data.type === 'error') {
+                        throw new Error(data.message);
                     }
                 }
             }
+
+            // Stream ended without a result event -- likely proxy cut the connection.
+            // Fall through to the recovery check below.
+            if (!gotResult) {
+                throw new Error("Stream ended unexpectedly. Checking if upload succeeded...");
+            }
         } catch (err) {
-            setError(err.message || 'Upload failed');
+            // Stream may have broken due to proxy timeout, but the backend might have
+            // finished processing. Poll the documents list to check.
+            setLogs(prev => [...prev, "🔄 Verifying upload status..."]);
+            const maxAttempts = 6;
+            for (let attempt = 0; attempt < maxAttempts; attempt++) {
+                await new Promise(r => setTimeout(r, 5000));
+                try {
+                    const checkResp = await fetch(`${API_URL}/api/fda/documents`);
+                    if (checkResp.ok) {
+                        const docs = await checkResp.json();
+                        const recent = docs.find(d =>
+                            d.filename === file.name &&
+                            new Date(d.processed_at) > new Date(Date.now() - 180000)
+                        );
+                        if (recent) {
+                            setLogs(prev => [...prev, "✅ Upload complete! Redirecting..."]);
+                            if (onUploadSuccess) onUploadSuccess({ document_id: recent.id, ...recent });
+                            setTimeout(() => navigate(`/process-fda/${recent.id}`), 1000);
+                            return;
+                        }
+                    }
+                } catch (_) { /* retry */ }
+                setLogs(prev => [...prev, `⏳ Still processing... (attempt ${attempt + 1}/${maxAttempts})`]);
+            }
+
+            setError("Upload timed out. Please refresh and check if the document appears in the list.");
             setUploading(false);
         }
     };

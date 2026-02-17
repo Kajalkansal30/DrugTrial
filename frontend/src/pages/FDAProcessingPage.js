@@ -16,6 +16,7 @@ import VerifiedUserIcon from '@mui/icons-material/VerifiedUser';
 import WarningIcon from '@mui/icons-material/Warning';
 import DomainVerificationIcon from '@mui/icons-material/DomainVerification';
 import InSilicoDashboard from '../components/InSilicoDashboard';
+import TrialReportModal from '../components/TrialReportModal';
 import './FDAProcessingPage.css';
 
 const API_BASE = process.env.REACT_APP_API_URL || '';
@@ -334,7 +335,16 @@ function FDAProcessingPage() {
 
 // Form Viewer Component
 function FDAFormViewer({ document, onClose, isWizard, onContinue, continuing }) {
-    const [activeTab, setActiveTab] = useState('1571');
+    // Persist active tab in URL hash so it survives refresh
+    const getInitialTab = () => {
+        const hash = window.location.hash.replace('#', '');
+        return ['1571', '1572', 'Intel', 'InSilico'].includes(hash) ? hash : '1571';
+    };
+    const [activeTab, setActiveTab] = useState(getInitialTab);
+    const handleTabChange = (tab) => {
+        setActiveTab(tab);
+        window.location.hash = tab;
+    };
     const [formData, setFormData] = useState({
         1571: document.fda_1571,
         1572: document.fda_1572,
@@ -348,6 +358,8 @@ function FDAFormViewer({ document, onClose, isWizard, onContinue, continuing }) 
     const [localReviewedBy, setLocalReviewedBy] = useState(document.document.reviewed_by);
     const [intelData, setIntelData] = useState(null);
     const [loadingIntel, setLoadingIntel] = useState(false);
+    const [insilicoData, setInsilicoData] = useState(null);
+    const [reportOpen, setReportOpen] = useState(false);
 
     const isEditable = localStatus === 'extracted';
     // Allow re-review if needed? Usually only if extracted.
@@ -396,26 +408,41 @@ function FDAFormViewer({ document, onClose, isWizard, onContinue, continuing }) 
         }
     };
 
-    const fetchIntel = async () => {
+    const fetchIntel = async (isPolling = false) => {
         const disease = formData['1571'].indication;
         if (!disease || disease === "Unknown") return;
 
-        setLoadingIntel(true);
+        if (!isPolling) setLoadingIntel(true);
         try {
             const response = await axios.get(`${API_BASE}/api/ltaa/report/${encodeURIComponent(disease)}`);
             setIntelData(response.data);
+            return response.data;
         } catch (error) {
             console.error("Error fetching Research Intel:", error);
+            return null;
         } finally {
-            setLoadingIntel(false);
+            if (!isPolling) setLoadingIntel(false);
         }
     };
 
+    // Initial fetch when Intel tab is selected
     useEffect(() => {
         if (activeTab === 'Intel' && !intelData) {
             fetchIntel();
         }
     }, [activeTab]);
+
+    // Auto-poll when status is "analyzing" (background analysis running)
+    useEffect(() => {
+        if (intelData?.status !== 'analyzing' || activeTab !== 'Intel') return;
+        const interval = setInterval(async () => {
+            const result = await fetchIntel(true);
+            if (result && result.status === 'ready') {
+                clearInterval(interval);
+            }
+        }, 10000);
+        return () => clearInterval(interval);
+    }, [intelData?.status, activeTab]);
 
     const handleSign = async (signatureData) => {
         try {
@@ -461,8 +488,21 @@ function FDAFormViewer({ document, onClose, isWizard, onContinue, continuing }) 
         <div className="form-viewer">
             <div className="form-viewer-header">
                 <h2>FDA Forms - {document.document.filename}</h2>
-                {/* In wizard, we might hide close or change it to 'Back to Upload' */}
-                {!isWizard && <button onClick={onClose} className="close-button">✕</button>}
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginLeft: 'auto' }}>
+                    <button
+                        onClick={() => setReportOpen(true)}
+                        className="action-button"
+                        style={{
+                            background: '#1e293b', color: 'white', border: 'none',
+                            padding: '8px 16px', borderRadius: '6px', fontWeight: 600,
+                            cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '6px',
+                            fontSize: '0.85rem'
+                        }}
+                    >
+                        Download Report
+                    </button>
+                    {!isWizard && <button onClick={onClose} className="close-button">✕</button>}
+                </div>
             </div>
 
             <div className="document-status">
@@ -478,26 +518,26 @@ function FDAFormViewer({ document, onClose, isWizard, onContinue, continuing }) 
             <div className="form-tabs">
                 <button
                     className={activeTab === '1571' ? 'active' : ''}
-                    onClick={() => setActiveTab('1571')}
+                    onClick={() => handleTabChange('1571')}
                 >
                     FDA Form 1571 (IND)
                 </button>
                 <button
                     className={activeTab === '1572' ? 'active' : ''}
-                    onClick={() => setActiveTab('1572')}
+                    onClick={() => handleTabChange('1572')}
                 >
                     FDA Form 1572 (Investigator)
                 </button>
                 <button
                     className={activeTab === 'Intel' ? 'active' : ''}
-                    onClick={() => setActiveTab('Intel')}
+                    onClick={() => handleTabChange('Intel')}
                     style={{ background: '#e3f2fd', color: '#1565c0', fontWeight: 'bold' }}
                 >
                     🧬 Research Intelligence (AI)
                 </button>
                 <button
                     className={activeTab === 'InSilico' ? 'active' : ''}
-                    onClick={() => setActiveTab('InSilico')}
+                    onClick={() => handleTabChange('InSilico')}
                     style={{ background: '#f0f4f8', color: '#24292e', fontWeight: 'bold' }}
                 >
                     🧪 In Silico Modeling (NEW)
@@ -560,8 +600,8 @@ function FDAFormViewer({ document, onClose, isWizard, onContinue, continuing }) 
                                         <div style={{ padding: '15px', backgroundColor: '#e3f2fd', borderRadius: '8px', marginBottom: '15px', display: 'flex', alignItems: 'center' }}>
                                             <CircularProgress size={20} sx={{ mr: 2 }} />
                                             <Typography variant="body2">
-                                                <strong>Analysis in Progress:</strong> The agent is currently reading research papers.
-                                                Please check back in 30-60 seconds.
+                                                <strong>Analysis in Progress:</strong> The agent is reading research papers and building the knowledge graph.
+                                                This page will auto-refresh every 10 seconds.
                                             </Typography>
                                         </div>
                                     )}
@@ -585,10 +625,18 @@ function FDAFormViewer({ document, onClose, isWizard, onContinue, continuing }) 
                                     </Box>
 
                                     {/* Scientific Summary */}
-                                    <div className="intel-report-summary">
-                                        <h3>Scientific Justification</h3>
-                                        <p>{intelData.report.summary}</p>
-                                    </div>
+                                    {intelData.report?.summary && (
+                                        <div className="intel-report-summary">
+                                            <h3>Scientific Justification</h3>
+                                            <p>{intelData.report.summary}</p>
+                                        </div>
+                                    )}
+                                    {intelData.summary && !intelData.report?.summary && (
+                                        <div className="intel-report-summary">
+                                            <h3>Scientific Justification</h3>
+                                            <p>{intelData.summary}</p>
+                                        </div>
+                                    )}
 
                                     {/* Excluded Entities Accordion */}
                                     {intelData.excluded_entities && intelData.excluded_entities.total_excluded > 0 && (
@@ -623,6 +671,60 @@ function FDAFormViewer({ document, onClose, isWizard, onContinue, continuing }) 
                                     )}
                                 </div>
 
+                                {/* Scientific Justifications (from template or LLM report) */}
+                                {intelData.report?.justifications && intelData.report.justifications.length > 0 && (
+                                    <div style={{ marginBottom: '24px' }}>
+                                        <h3>Target Justifications</h3>
+                                        {intelData.report.justifications.map((j, idx) => (
+                                            <div key={idx} style={{
+                                                padding: '16px', marginBottom: '12px',
+                                                border: '1px solid #e0e0e0', borderRadius: '8px',
+                                                borderLeft: `4px solid ${idx === 0 ? '#1976d2' : idx === 1 ? '#2e7d32' : '#ed6c02'}`,
+                                                background: '#fafafa'
+                                            }}>
+                                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+                                                    <Typography variant="subtitle1" sx={{ fontWeight: 700 }}>
+                                                        {j.target}
+                                                    </Typography>
+                                                    {j.confidence_score != null && (
+                                                        <Chip
+                                                            label={`Confidence: ${(j.confidence_score * 100).toFixed(0)}%`}
+                                                            size="small"
+                                                            color={j.confidence_score >= 0.7 ? 'success' : j.confidence_score >= 0.4 ? 'warning' : 'default'}
+                                                            variant="outlined"
+                                                            sx={{ fontWeight: 600 }}
+                                                        />
+                                                    )}
+                                                </div>
+                                                {j.biological_context && (
+                                                    <Typography variant="body2" sx={{ mb: 0.5 }}>
+                                                        <strong>Biological Context:</strong> {j.biological_context}
+                                                    </Typography>
+                                                )}
+                                                {j.disease_mechanism && (
+                                                    <Typography variant="body2" sx={{ mb: 0.5 }}>
+                                                        <strong>Disease Mechanism:</strong> {j.disease_mechanism}
+                                                    </Typography>
+                                                )}
+                                                {j.therapeutic_rationale && (
+                                                    <Typography variant="body2" sx={{ mb: 0.5 }}>
+                                                        <strong>Therapeutic Rationale:</strong> {j.therapeutic_rationale}
+                                                    </Typography>
+                                                )}
+                                                {j.evidence_snippets && j.evidence_snippets.length > 0 && (
+                                                    <Box sx={{ mt: 1, pl: 1, borderLeft: '2px solid #ccc' }}>
+                                                        {j.evidence_snippets.map((s, sidx) => (
+                                                            <Typography key={sidx} variant="caption" display="block" sx={{ color: '#555', fontStyle: 'italic', mb: 0.3 }}>
+                                                                "{typeof s === 'string' ? s.substring(0, 150) : s}..."
+                                                            </Typography>
+                                                        ))}
+                                                    </Box>
+                                                )}
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
+
                                 {/* Targets Table */}
                                 <div className="intel-targets-list">
                                     <h3>Discovered Biological Targets</h3>
@@ -631,13 +733,15 @@ function FDAFormViewer({ document, onClose, isWizard, onContinue, continuing }) 
                                             <tr>
                                                 <th>Target/Gene</th>
                                                 <th>Type</th>
-                                                <th>Validation</th>
+                                                <th>Evidence</th>
                                                 <th>Score</th>
                                                 <th>Top Citations</th>
                                             </tr>
                                         </thead>
                                         <tbody>
-                                            {intelData.targets?.slice(0, 10).map((t, idx) => (
+                                            {(intelData.ranked_targets || intelData.targets || []).slice(0, 10).map((t, idx) => {
+                                                const refs = t.evidence || t.citations || [];
+                                                return (
                                                 <tr key={idx}>
                                                     <td className="target-name">
                                                         <div style={{ fontWeight: 'bold' }}>{t.name}</div>
@@ -648,48 +752,47 @@ function FDAFormViewer({ document, onClose, isWizard, onContinue, continuing }) 
                                                         )}
                                                     </td>
                                                     <td>
-                                                        <span className={`type-tag ${t.type?.toLowerCase().replace('/', '')}`}>
+                                                        <span className={`type-tag ${t.type?.toLowerCase().replace(/\//g, '')}`}>
                                                             {t.type}
                                                         </span>
                                                     </td>
-                                                    <td>
-                                                        {t.validation_source ? (
-                                                            <Tooltip title={`Validated via ${t.validation_source}`}>
-                                                                <Chip
-                                                                    icon={<VerifiedUserIcon style={{ fontSize: 14 }} />}
-                                                                    label="Verified"
-                                                                    size="small"
-                                                                    color="success"
-                                                                    variant="outlined"
-                                                                    style={{ height: 24, fontSize: '0.75rem' }}
-                                                                />
-                                                            </Tooltip>
-                                                        ) : (
-                                                            <Chip label="Unverified" size="small" variant="outlined" style={{ height: 24, fontSize: '0.75rem' }} />
-                                                        )}
+                                                    <td style={{ textAlign: 'center' }}>
+                                                        <Chip
+                                                            label={`${t.mentions || refs.length} sources`}
+                                                            size="small"
+                                                            color="primary"
+                                                            variant="outlined"
+                                                            sx={{ fontWeight: 600, height: 24, fontSize: '0.75rem' }}
+                                                        />
                                                     </td>
                                                     <td className="score-cell">
                                                         <div style={{ display: 'flex', alignItems: 'center' }}>
-                                                            <span style={{ marginRight: '8px' }}>{Number(t.score).toFixed(1)}</span>
+                                                            <span style={{ marginRight: '8px', fontWeight: 600 }}>{Number(t.score).toFixed(1)}</span>
                                                             <div style={{ width: '50px', height: '6px', background: '#eee', borderRadius: '3px' }}>
                                                                 <div style={{ width: `${Math.min(t.score * 10, 100)}%`, height: '100%', background: '#1976d2', borderRadius: '3px' }}></div>
                                                             </div>
                                                         </div>
                                                     </td>
                                                     <td className="citation-cell">
-                                                        {t.citations?.slice(0, 2).map((c, cidx) => (
+                                                        {refs.slice(0, 2).map((c, cidx) => {
+                                                            const src = c.source || '';
+                                                            const text = c.snippet || c.context || '';
+                                                            return (
                                                             <div key={cidx} className="citation-snippet">
                                                                 <small>
-                                                                    {c.source.startsWith('http') ? '🌐 PubMed' : '📄 ' + c.source}
+                                                                    {src.startsWith('http') ? 'PubMed' : src}
                                                                     {c.page > 0 && ` (Page ${c.page})`}
                                                                 </small>
-                                                                <p>"{c.context?.substring(0, 100)}..."</p>
+                                                                {text && <p style={{ margin: '2px 0', fontSize: '0.75rem', color: '#555' }}>"{text.substring(0, 100)}..."</p>}
                                                             </div>
-                                                        ))}
+                                                            );
+                                                        })}
+                                                        {refs.length === 0 && <small style={{ color: '#999' }}>No citations</small>}
                                                     </td>
                                                 </tr>
-                                            ))}
-                                            {(!intelData.targets || intelData.targets.length === 0) && (
+                                                );
+                                            })}
+                                            {(intelData.ranked_targets || intelData.targets || []).length === 0 && (
                                                 <tr>
                                                     <td colSpan="5" style={{ textAlign: 'center', padding: '20px', color: '#888' }}>
                                                         No high-confidence targets found yet.
@@ -699,6 +802,19 @@ function FDAFormViewer({ document, onClose, isWizard, onContinue, continuing }) 
                                         </tbody>
                                     </table>
                                 </div>
+
+                                {/* Analysis Stats Summary */}
+                                {intelData.stats && (
+                                    <Box sx={{ mt: 3, p: 2, bgcolor: '#f5f5f5', borderRadius: '8px', display: 'flex', flexWrap: 'wrap', gap: 2 }}>
+                                        <Typography variant="caption" sx={{ fontWeight: 700, width: '100%', mb: 0.5 }}>Analysis Statistics</Typography>
+                                        <Chip label={`PubMed Articles: ${intelData.stats.pubmed_count || 0}`} size="small" variant="outlined" />
+                                        <Chip label={`PDF Documents: ${intelData.stats.pdf_count || 0}`} size="small" variant="outlined" />
+                                        <Chip label={`Targets Found: ${intelData.stats.targets_found || 0}`} size="small" variant="outlined" color="primary" />
+                                        {intelData.stats.entities_rejected > 0 && (
+                                            <Chip label={`Entities Filtered: ${intelData.stats.entities_rejected}`} size="small" variant="outlined" color="warning" />
+                                        )}
+                                    </Box>
+                                )}
                             </div>
                         ) : (
                             <div className="intel-empty">
@@ -717,8 +833,10 @@ function FDAFormViewer({ document, onClose, isWizard, onContinue, continuing }) 
                 <div style={{ display: activeTab === 'InSilico' ? 'block' : 'none' }}>
                     <div className="form-section">
                         <InSilicoDashboard
-                            trialId={document.document.id}
+                            trialId={document.trial?.trial_id || document.document.id}
                             indication={formData['1571'].indication}
+                            isActive={activeTab === 'InSilico'}
+                            onDataLoaded={setInsilicoData}
                         />
                     </div>
                 </div>
@@ -773,6 +891,15 @@ function FDAFormViewer({ document, onClose, isWizard, onContinue, continuing }) 
                     onCancel={() => setShowSignModal(false)}
                 />
             )}
+
+            <TrialReportModal
+                open={reportOpen}
+                onClose={() => setReportOpen(false)}
+                formData={formData}
+                intelData={intelData}
+                insilicoData={insilicoData}
+                documentInfo={document}
+            />
         </div>
     );
 }

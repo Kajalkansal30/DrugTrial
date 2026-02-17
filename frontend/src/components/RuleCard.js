@@ -65,7 +65,7 @@ const RuleCard = ({ rule }) => {
         const iconStyle = { fontSize: 20, color: accentColor, opacity: 0.9 };
 
         if (cat === 'LAB_THRESHOLD') return <Science sx={iconStyle} />;
-        if (cat === 'AGE') return <Person sx={iconStyle} />;
+        if (cat === 'AGE' || cat === 'WEIGHT') return <Person sx={iconStyle} />;
         if (cat === 'TEMPORAL') return <Event sx={iconStyle} />;
         if (cat.includes('PREGNANCY') || cat === 'CONTRACEPTION') return <PregnantWoman sx={iconStyle} />;
         if (cat === 'CONDITION_ABSENT') return <Block sx={iconStyle} />;
@@ -75,6 +75,7 @@ const RuleCard = ({ rule }) => {
         if (cat === 'VITAL_SIGN' || cat === 'EKG') return <MonitorHeart sx={iconStyle} />;
         if (cat === 'REPRODUCTIVE_STATUS') return <Person sx={iconStyle} />;
         if (cat === 'MEDICAL_HISTORY') return <History sx={iconStyle} />;
+        if (cat === 'CONSENT_REQUIREMENT') return <Verified sx={iconStyle} />;
         if (cat.includes('CONDITION')) return isAbsence ? <Block sx={iconStyle} /> : <Gavel sx={iconStyle} />;
 
         return <QuestionMark sx={iconStyle} />;
@@ -83,7 +84,14 @@ const RuleCard = ({ rule }) => {
     const safeLabel = (val) => {
         if (val === null || val === undefined) return '';
         if (typeof val === 'object') return JSON.stringify(val);
-        return String(val);
+        let s = String(val).replace(/\n/g, ' ').trim();
+        return s;
+    };
+
+    // Clean text for display: normalize newlines to spaces
+    const cleanText = (text) => {
+        if (!text) return '';
+        return text.replace(/\n/g, ' ').replace(/\s{2,}/g, ' ').trim();
     };
 
     const renderLogic = () => {
@@ -92,7 +100,12 @@ const RuleCard = ({ rule }) => {
 
         if (!hasLogic) return null;
 
-        const showValue = data.value && String(data.value).toLowerCase() !== 'true' && String(data.value).toLowerCase() !== 'null';
+        const showValue = data.value && String(data.value).trim() !== '' && 
+            String(data.value).toLowerCase() !== 'true' && 
+            String(data.value).toLowerCase() !== 'null' &&
+            String(data.value).toLowerCase() !== 'false';
+        // Only show value2 if it's a short numeric/range value, not a long description
+        const showValue2 = data.value2 && String(data.value2).trim() !== '' && String(data.value2).length < 50;
 
         return (
             <Box sx={{
@@ -163,35 +176,42 @@ const RuleCard = ({ rule }) => {
                 )}
 
                 {/* Field Name */}
-                {data.field && (
-                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
-                        <Typography variant="caption" sx={{ color: '#64748b', fontWeight: 700, fontSize: '0.65rem' }}>FIELD:</Typography>
-                        <Chip
-                            label={safeLabel(data.field)}
-                            size="small"
-                            variant="outlined"
-                            sx={{
-                                height: 20,
-                                fontSize: '0.7rem',
-                                fontWeight: 600,
-                                borderColor: borderColor,
-                                color: accentColor,
-                                bgcolor: 'white',
-                                maxWidth: 200
-                            }}
-                        />
-                    </Box>
+                {data.field && data.field.length > 2 && (
+                    <Tooltip title={safeLabel(data.field)} placement="top">
+                        <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+                            <Typography variant="caption" sx={{ color: '#64748b', fontWeight: 700, fontSize: '0.65rem' }}>FIELD:</Typography>
+                            <Chip
+                                label={safeLabel(data.field).length > 30 ? safeLabel(data.field).slice(0, 28) + '...' : safeLabel(data.field)}
+                                size="small"
+                                variant="outlined"
+                                sx={{
+                                    height: 20,
+                                    fontSize: '0.7rem',
+                                    fontWeight: 600,
+                                    borderColor: borderColor,
+                                    color: accentColor,
+                                    bgcolor: 'white',
+                                    maxWidth: 220,
+                                    '& .MuiChip-label': {
+                                        overflow: 'hidden',
+                                        textOverflow: 'ellipsis',
+                                        whiteSpace: 'nowrap'
+                                    }
+                                }}
+                            />
+                        </Box>
+                    </Tooltip>
                 )}
 
                 {/* Operator */}
-                {data.operator && data.operator !== 'PRESENT' && data.operator !== 'ABSENT' && (
+                {data.operator && data.operator.trim() !== '' && data.operator !== 'PRESENT' && data.operator !== 'ABSENT' && data.operator !== 'AND' && (
                     <Typography variant="caption" sx={{ fontWeight: 800, color: accentColor, fontSize: '0.75rem', px: 0.5 }}>
                         {data.operator}
                     </Typography>
                 )}
 
                 {/* Value and Value2 for ranges - Enhanced */}
-                {(showValue || data.value2) && (
+                {(showValue || showValue2) && (
                     <Box sx={{
                         display: 'flex',
                         alignItems: 'center',
@@ -207,8 +227,8 @@ const RuleCard = ({ rule }) => {
                             fontWeight: 600,
                             color: accentColor
                         }}>
-                            {safeLabel(data.value)}
-                            {data.value2 && ` - ${safeLabel(data.value2)}`}
+                            {showValue && safeLabel(data.value)}
+                            {showValue2 && ` - ${safeLabel(data.value2)}`}
                             {data.unit && ` ${formatUnit(data.unit)}`}
                         </Typography>
                     </Box>
@@ -273,9 +293,10 @@ const RuleCard = ({ rule }) => {
                         color: '#334155',
                         fontSize: '0.875rem',
                         lineHeight: 1.6,
-                        flex: 1
+                        flex: 1,
+                        wordBreak: 'break-word'
                     }}>
-                        {rule.text}
+                        {cleanText(rule.text)}
                     </Typography>
                     {rule.source_text && (
                         <Tooltip

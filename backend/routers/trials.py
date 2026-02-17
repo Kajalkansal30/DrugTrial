@@ -9,9 +9,41 @@ from backend.db_models import get_session, Patient, ClinicalTrial, EligibilityCr
 from backend.agents.protocol_rule_agent import ProtocolRuleAgent
 from backend.agents.fda_processor import FDAProcessor
 import json
+import re
 
 router = APIRouter(prefix="/api/trials", tags=["trials"])
 logger = logging.getLogger(__name__)
+
+
+def _clean_criterion_text(text: str) -> str:
+    """Clean criterion text for UI display: normalize newlines, trim whitespace."""
+    if not text:
+        return text
+    # Replace literal newlines with spaces, collapse multiple spaces
+    cleaned = re.sub(r'\s*\n\s*', ' ', text)
+    cleaned = re.sub(r'\s{2,}', ' ', cleaned)
+    return cleaned.strip()
+
+
+def _clean_structured_data(sd: dict) -> dict:
+    """Clean structured_data for UI display: cap field length, clean newlines."""
+    if not sd:
+        return {}
+    result = dict(sd)
+    # Clean newlines from field
+    if result.get('field'):
+        field = re.sub(r'\s*\n\s*', ' ', str(result['field']))
+        if len(field) > 60:
+            field = field[:57] + "..."
+        result['field'] = field
+    # Clean newlines from source_text
+    if result.get('source_text'):
+        result['source_text'] = re.sub(r'\s*\n\s*', ' ', str(result['source_text']))
+    return result
+
+
+# In-memory cache for glossary definitions (keyed by trial_id)
+_glossary_cache = {}
 
 # Ensure uploads directory exists
 UPLOAD_DIR = "uploads"
@@ -60,51 +92,103 @@ def get_ocr_processor():
 def run_ltaa_analysis(indication: str, trial_id: str):
     """
     Background task to run LTAA (Research Intelligence) analysis.
-    This runs asynchronously after upload to avoid blocking the request.
+    Uses singleton agent from orchestrator to avoid re-loading models.
+    Persists results to ClinicalTrial.analysis_results for durability.
     """
     try:
         logger.info(f"📊 [BACKGROUND] Starting LTAA for: {indication}")
-        from backend.agents.ltaa_agent import LTAAAgent
-        ltaa_agent = LTAAAgent()
+        from backend.agents.orchestrator import _get_ltaa_agent
+        ltaa_agent = _get_ltaa_agent()
         results = ltaa_agent.analyze_disease(indication, target_trial_id=trial_id)
         target_count = len(results.get('ranked_targets', []))
         logger.info(f"✅ [BACKGROUND] LTAA completed for '{indication}': {target_count} targets found")
+        
+        # Persist LTAA results to DB for durability across restarts
+        try:
+            db = get_session()
+            # trial_id can be a trial_id string ("TRIAL_DNDI_BFCD") or a doc.id string ("103")
+            trial = db.query(ClinicalTrial).filter_by(trial_id=trial_id).first()
+            if not trial and str(trial_id).isdigit():
+                trial = db.query(ClinicalTrial).filter_by(document_id=int(trial_id)).first()
+            if not trial:
+                trial = db.query(ClinicalTrial).filter(ClinicalTrial.indication == indication).first()
+            if trial:
+                existing = trial.analysis_results or {}
+                existing['ltaa'] = results
+                trial.analysis_results = existing
+                from sqlalchemy.orm.attributes import flag_modified
+                flag_modified(trial, 'analysis_results')
+                db.commit()
+                logger.info(f"💾 [BACKGROUND] LTAA results persisted to DB for trial: {trial.trial_id}")
+            # Audit log
+            try:
+                from backend.utils.auditor import Auditor
+                auditor = Auditor(db)
+                auditor.log(
+                    action="LTAA Analysis Completed",
+                    agent="LTAAAgent",
+                    target_type="trial",
+                    target_id=str(trial_id),
+                    status="Success",
+                    details={"indication": indication, "targets_found": target_count},
+                )
+            except Exception:
+                pass
+            db.close()
+        except Exception as db_err:
+            logger.error(f"⚠️ [BACKGROUND] Failed to persist LTAA to DB: {db_err}")
     except Exception as e:
         logger.error(f"❌ [BACKGROUND] LTAA failed for '{indication}': {e}")
         import traceback
         traceback.print_exc()
+        try:
+            db = get_session()
+            from backend.utils.auditor import Auditor
+            auditor = Auditor(db)
+            auditor.log(
+                action="LTAA Analysis Failed",
+                agent="LTAAAgent",
+                target_type="trial",
+                target_id=str(trial_id),
+                status="Failed",
+                details={"indication": indication, "error": str(e)},
+            )
+            db.close()
+        except Exception:
+            pass
 
 def run_insilico_analysis(trial_id: str, text: str):
     """
     Background task to run In Silico modeling (Toxicity, DDI, PK/PD).
+    Uses singleton agents from orchestrator to avoid re-loading models.
     """
     try:
         logger.info(f"🧪 [BACKGROUND] Starting In Silico analysis for trial: {trial_id}")
-        from backend.agents.insilico.drug_extraction_agent import DrugExtractionAgent
-        from backend.agents.insilico.chemical_resolver import ChemicalResolver
-        from backend.agents.insilico.toxicity_agent import ToxicityAgent
-        from backend.agents.insilico.ddi_agent import DDIAgent
         import pickle
+        import re
         from pathlib import Path
+        import time
 
-        # 1. Extract
-        extractor = DrugExtractionAgent()
+        cache_dir = Path("/app/data/insilico_cache")
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        cache_path = cache_dir / f"{trial_id}.pkl"
+        
+        if cache_path.exists():
+             if time.time() - cache_path.stat().st_mtime < 300:
+                  logger.info(f"⏭️  [BACKGROUND] Stable cache exists for '{trial_id}'. Skipping.")
+                  return
+
+        from backend.agents.orchestrator import _get_insilico_agents
+        extractor, resolver, tox_agent, ddi_agent, target_agent, pkpd_sim = _get_insilico_agents()
+
         drug_data = extractor.extract_drug_data(text)
-        
-        # 2. Model - Deep Molecular Analysis
-        from backend.agents.insilico.molecular_target_agent import MolecularTargetAgent
-        resolver = ChemicalResolver()
-        tox_agent = ToxicityAgent()
-        ddi_agent = DDIAgent()
-        target_agent = MolecularTargetAgent()
-        
         target_analysis = target_agent.analyze_text(text)
         
         results = []
         for drug in drug_data.get("trial_drugs", []):
             chem = resolver.resolve_name(drug['name'])
             tox = None
-            if chem and chem.get('smiles'): # Add check for smiles
+            if chem and chem.get('smiles'):
                 tox = tox_agent.predict_toxicity(chem['smiles'])
             results.append({"drug": drug, "chem": chem, "tox": tox})
             
@@ -113,45 +197,88 @@ def run_insilico_analysis(trial_id: str, text: str):
             drug_data.get("prohibited_meds", [])
         )
         
-        # 3. PK Simulation (for the first drug)
-        from backend.agents.insilico.pkpd_simulator import PKPDSimulator
-        pkpd_sim = PKPDSimulator()
         simulation = None
         if drug_data.get("trial_drugs"):
             def safe_float(val, default):
                 try:
                     if isinstance(val, (int, float)): return float(val)
-                    import re
                     nums = re.findall(r"[-+]?\d*\.\d+|\d+", str(val))
                     return float(nums[0]) if nums else float(default)
-                except:
+                except Exception:
                     return float(default)
 
             first_drug = drug_data["trial_drugs"][0]
             simulation = pkpd_sim.simulate_1_compartment(
                 dose_mg=safe_float(first_drug.get("dose"), 100),
-                dose_interval_hr=24, # Daily
+                dose_interval_hr=24,
                 num_doses=7
             )
 
-        # 4. Cache results - Include Target Analysis
-        cache_dir = Path("/app/data/insilico_cache")
-        cache_dir.mkdir(parents=True, exist_ok=True)
-        cache_path = cache_dir / f"{trial_id}.pkl"
+        insilico_data = {
+            "drugs": results, 
+            "interactions": interactions,
+            "simulation": simulation,
+            "target_analysis": target_analysis
+        }
         
         with open(cache_path, "wb") as f:
-            pickle.dump({
-                "drugs": results, 
-                "interactions": interactions,
-                "simulation": simulation,
-                "target_analysis": target_analysis
-            }, f)
+            pickle.dump(insilico_data, f)
+        
+        # Persist InSilico results to DB for durability across restarts
+        try:
+            db = get_session()
+            # trial_id can be a trial_id string ("TRIAL_DNDI_BFCD") or a doc.id int/string
+            trial = db.query(ClinicalTrial).filter_by(trial_id=str(trial_id)).first()
+            if not trial and str(trial_id).isdigit():
+                trial = db.query(ClinicalTrial).filter_by(document_id=int(trial_id)).first()
+            if trial:
+                existing = trial.analysis_results or {}
+                existing['insilico'] = insilico_data
+                trial.analysis_results = existing
+                from sqlalchemy.orm.attributes import flag_modified
+                flag_modified(trial, 'analysis_results')
+                db.commit()
+                logger.info(f"💾 [BACKGROUND] InSilico results persisted to DB for trial: {trial.trial_id}")
+            db.close()
+            # Audit log
+            try:
+                from backend.utils.auditor import Auditor
+                auditor = Auditor(db)
+                drug_count = len(insilico_data.get("drugs", []))
+                auditor.log(
+                    action="InSilico Analysis Completed",
+                    agent="InSilicoAgents",
+                    target_type="trial",
+                    target_id=str(trial_id),
+                    status="Success",
+                    details={"drugs_analyzed": drug_count, "has_simulation": simulation is not None},
+                )
+            except Exception:
+                pass
+            db.close()
+        except Exception as db_err:
+            logger.error(f"⚠️ [BACKGROUND] Failed to persist InSilico to DB: {db_err}")
             
         logger.info(f"✅ [BACKGROUND] In Silico completed for '{trial_id}'")
     except Exception as e:
         logger.error(f"❌ [BACKGROUND] In Silico failed for '{trial_id}': {e}")
         import traceback
         traceback.print_exc()
+        try:
+            db = get_session()
+            from backend.utils.auditor import Auditor
+            auditor = Auditor(db)
+            auditor.log(
+                action="InSilico Analysis Failed",
+                agent="InSilicoAgents",
+                target_type="trial",
+                target_id=str(trial_id),
+                status="Failed",
+                details={"error": str(e)},
+            )
+            db.close()
+        except Exception:
+            pass
 
 def extract_pdf_text(file_path: str) -> str:
     """Extract text from PDF file with OCR fallback"""
@@ -196,36 +323,43 @@ async def upload_protocol(file: UploadFile = File(...), background_tasks: Backgr
         text = extract_pdf_text(file_path)
         print(f"📄 Extracted {len(text)} characters")
 
-        # Extract FDA Forms
+        # Parallel Execution: Extract FDA Forms and Criteria concurrently
+        import concurrent.futures
+        
         fda_data = {"fda_1571": {}, "fda_1572": {}}
-        extractor = get_form_extractor()
-        if extractor:
-            try:
-                extraction_result = extractor.process_pdf(file_path)
-                fda_data = {
-                    "fda_1571": extraction_result.get('fda_1571', {}),
-                    "fda_1572": extraction_result.get('fda_1572', {})
-                }
-            except Exception as e:
-                print(f"⚠️  FDA form extraction warning: {e}")
-
-        # Extract eligibility criteria using enhanced NLP agent
         criteria = {'inclusion': [], 'exclusion': []}
         extracted_glossary = {}
-        
-        agent = get_nlp_agent()
-        if agent and text.strip():
-            try:
-                print("🤖 Starting AI extraction with dynamic NLP...")
-                criteria = agent.extract_rules(text)
-                extracted_glossary = agent.get_glossary()
-                
-                print(f"✅ Extracted {len(criteria.get('inclusion', []))} inclusion, {len(criteria.get('exclusion', []))} exclusion criteria")
-                print(f"📚 Extracted {len(extracted_glossary)} glossary terms")
-            except Exception as e:
-                print(f"❌ Extraction error: {e}")
-                import traceback
-                traceback.print_exc()
+
+        def run_fda_extraction():
+            nonlocal fda_data
+            extractor = get_form_extractor()
+            if extractor:
+                try:
+                    print("🤖 Starting parallel FDA form extraction...")
+                    extraction_result = extractor.process_pdf(file_path)
+                    fda_data = {
+                        "fda_1571": extraction_result.get('fda_1571', {}),
+                        "fda_1572": extraction_result.get('fda_1572', {})
+                    }
+                    print("✅ FDA form extraction complete")
+                except Exception as e:
+                    print(f"⚠️  FDA form extraction warning: {e}")
+
+        def run_criteria_extraction():
+            nonlocal criteria, extracted_glossary
+            agent = get_nlp_agent()
+            if agent and text.strip():
+                try:
+                    print("🤖 Starting parallel AI criteria extraction...")
+                    criteria = agent.extract_rules(text)
+                    extracted_glossary = agent.get_glossary()
+                    print(f"✅ Extracted {len(criteria.get('inclusion', []))} inclusion, {len(criteria.get('exclusion', []))} exclusion criteria")
+                except Exception as e:
+                    print(f"❌ Criteria extraction error: {e}")
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            executor.submit(run_fda_extraction)
+            executor.submit(run_criteria_extraction)
         
         # Fallback if extraction failed
         if not criteria.get('inclusion') and not criteria.get('exclusion'):
@@ -252,7 +386,22 @@ async def upload_protocol(file: UploadFile = File(...), background_tasks: Backgr
             db.refresh(new_trial)
             
             print(f"💾 Trial created: {new_trial.trial_id}")
-            
+
+            # Audit: Trial created from protocol upload
+            try:
+                from backend.utils.auditor import Auditor
+                auditor = Auditor(db)
+                auditor.log(
+                    action="Trial Created from Protocol Upload",
+                    agent="ProtocolRuleAgent",
+                    target_type="trial",
+                    target_id=new_trial.trial_id,
+                    status="Success",
+                    details={"filename": file.filename, "indication": new_trial.indication, "drug": new_trial.drug_name},
+                )
+            except Exception:
+                pass
+
             # Save criteria with enhanced structured data
             criteria_count = 0
             for c_type in ['inclusion', 'exclusion']:
@@ -310,7 +459,20 @@ async def upload_protocol(file: UploadFile = File(...), background_tasks: Backgr
             
             db.commit()
             print(f"✅ Saved {criteria_count} criteria to database")
-            
+
+            # Audit: Criteria extracted
+            try:
+                auditor.log(
+                    action="Eligibility Criteria Extracted",
+                    agent="ProtocolRuleAgent",
+                    target_type="trial",
+                    target_id=new_trial.trial_id,
+                    status="Success",
+                    details={"criteria_count": criteria_count},
+                )
+            except Exception:
+                pass
+
             result_data = {
                 "trial_id": new_trial.trial_id,
                 "title": new_trial.protocol_title,
@@ -328,16 +490,25 @@ async def upload_protocol(file: UploadFile = File(...), background_tasks: Backgr
                 "glossary_terms": len(extracted_glossary)
             }
             
-            # Queue Background LTAA Analysis (Research Intelligence)
-            indication = new_trial.indication
-            if indication and indication != "Unknown" and background_tasks:
-                background_tasks.add_task(run_ltaa_analysis, indication, new_trial.trial_id)
-                logger.info(f"🔄 Queued background LTAA analysis for: {indication}")
             
-            # Queue In Silico Analysis
-            if text and background_tasks:
-                background_tasks.add_task(run_insilico_analysis, new_trial.trial_id, text)
-                logger.info(f"🧪 Queued background In Silico analysis for trial: {new_trial.trial_id}")
+            # Queue Background Agents via Event Bus (Orchestrator will handle this)
+            from backend.events import event_bus
+            
+            # Construct event data
+            trial_data = {
+                "trial_id": new_trial.trial_id,
+                "title": new_trial.protocol_title,
+                "disease": new_trial.indication,
+                "drug_name": new_trial.drug_name,
+                "phase": new_trial.phase,
+                "description": text[:3000] if text else "",
+                "criteria": str(criteria)[:3000], 
+                "full_text": text
+            }
+            
+            logger.info(f"📡 Publishing TRIAL_CREATED event for {new_trial.trial_id}")
+            background_tasks.add_task(event_bus.publish, "TRIAL_CREATED", trial_data)
+
 
             db.close()
             return result_data
@@ -399,6 +570,7 @@ async def get_trial_rules(trial_id: str):
             "trial_id": trial_id,
             "title": trial.protocol_title,
             "status": trial.status,
+            "analysis_status": trial.analysis_status or "pending",
             "metadata": {
                 "drug": trial.drug_name,
                 "phase": trial.phase,
@@ -413,13 +585,14 @@ async def get_trial_rules(trial_id: str):
                 {
                     "id": c.id,
                     "type": c.criterion_type,
-                    "text": c.text,
+                    "text": _clean_criterion_text(c.text),
+                    "source_text": c.text,
                     "category": c.category,
                     "operator": c.operator,
                     "value": c.value,
                     "unit": c.unit,
                     "negated": c.negated,
-                    "structured_data": c.structured_data or {}
+                    "structured_data": _clean_structured_data(c.structured_data)
                 } for c in criteria
             ]
         }
@@ -443,14 +616,68 @@ async def get_trial_glossary(trial_id: str):
         for c in criteria:
             structured = c.structured_data or {}
             field = structured.get('field')
+            
+            # Skip very generic terms that might have leaked
+            if not field or len(field) < 3:
+                continue
+                
             if field and field not in glossary:
+                # Determine Category based on semantic type
+                sem = structured.get('semantic_type', '')
+                category = "General"
+                if sem in ['T047', 'T191']: category = "Condition/Diagnosis"
+                elif sem in ['T116', 'T121']: category = "Medication/Chemical"
+                elif sem in ['T060', 'T061']: category = "Procedure"
+                elif sem in ['T033', 'T034']: category = "Lab/Finding"
+                
                 glossary[field] = {
                     "term": field,
+                    "category": category,
                     "umls_cui": structured.get('umls_cui'),
-                    "semantic_type": structured.get('semantic_type'),
-                    "used_in": c.criterion_type
+                    "semantic_type": sem,
+                    "used_in": c.criterion_type,
+                    "definition": None
                 }
+
+        # Select top terms to define (limit to avoid slow response)
+        terms_to_define = [g for g in glossary.values() if g['term'].lower() not in ['age', 'male', 'female']][:10]
         
+        if terms_to_define:
+             # Check cache first to avoid redundant LLM calls
+             cache_key = trial_id
+             cached_defs = _glossary_cache.get(cache_key)
+             
+             if cached_defs:
+                 for term, definition in cached_defs.items():
+                     if term in glossary:
+                         glossary[term]['definition'] = definition
+             else:
+                 from backend.nlp_utils import get_llm
+                 llm = get_llm()
+                 term_list = ", ".join([t['term'] for t in terms_to_define])
+                 
+                 prompt = f"""Provide concise medical definitions and clinical significance for these terms in the context of a clinical trial: {term_list}.
+                 
+                 Return ONLY JSON:
+                 {{
+                   "term_name": "Concise definition | Why it matters in this trial"
+                 }}
+                 """
+                 try:
+                     response = llm.invoke(prompt)
+                     import json
+                     cleaned = response.replace('```json', '').replace('```', '').strip()
+                     start = cleaned.find('{')
+                     end = cleaned.rfind('}')
+                     if start != -1 and end != -1:
+                         defs = json.loads(cleaned[start:end+1])
+                         _glossary_cache[cache_key] = defs  # Cache for future requests
+                         for term, definition in defs.items():
+                             if term in glossary:
+                                 glossary[term]['definition'] = definition
+                 except Exception as e:
+                     logger.warning(f"Failed to generate glossary definitions: {e}")
+
         return {
             "trial_id": trial_id,
             "glossary": list(glossary.values()),
@@ -492,7 +719,8 @@ async def list_trials():
                     "drug": t.drug_name,
                     "phase": t.phase,
                     "indication": t.indication,
-                    "status": t.status
+                    "status": t.status,
+                    "analysis_status": t.analysis_status or "pending"
                 }
                 for t in trials
             ]

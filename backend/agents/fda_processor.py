@@ -17,7 +17,6 @@ import pdfplumber
 
 # NLP
 import spacy
-from langchain_ollama import OllamaLLM
 
 
 class FDAProcessor:
@@ -30,9 +29,10 @@ class FDAProcessor:
         """Initialize processor with shared NLP models and LLM"""
         from backend.nlp_utils import get_nlp, get_llm
         self.nlp = get_nlp("en_core_sci_lg", load_linker=load_linker)
-        self.nlp_general = get_nlp("en_core_web_sm", load_linker=False) # Hybrid approach: Standard NER for ORG/PERSON
+        self.nlp_general = get_nlp("en_core_web_sm", load_linker=False)
         self.llm = get_llm()
         self.has_entity_linker = "scispacy_linker" in self.nlp.pipe_names
+        self._last_full_text = ""  # Cache last extracted text to avoid re-reading PDF
     
     def _parse_llm_json(self, response: str) -> Optional[Dict]:
         """Robustly parse JSON from LLM response, handling markdown and control characters."""
@@ -225,6 +225,7 @@ class FDAProcessor:
         # Stage 1: Extract text with table parsing
         if log_callback: log_callback("📑 Extracting text and tables...")
         full_text, structured_data = self._extract_text_with_tables(pdf_path)
+        self._last_full_text = full_text  # Cache for reuse by router
         doc_hash = self._compute_hash(pdf_path)
         
         # Reuse text processing logic
@@ -234,43 +235,58 @@ class FDAProcessor:
 
     def process_text(self, full_text: str, structured_data: Dict = {}, log_callback=None) -> Dict[str, Any]:
         """
-        Process raw text input (for testing or non-PDF sources)
+        Process raw text input (for testing or non-PDF sources).
+        OPTIMIZED: Uses heuristic extraction first, then a SINGLE consolidated LLM call
+        to fill all gaps at once (instead of 5-7 separate LLM calls).
         """
         if log_callback: log_callback("🔍 Analyzing text content and extracting FDA forms...")
         
-        # Stage 2: Consolidated Extraction
-        # We use first 3-5 pages for high context (first 8000-10000 chars)
-        context_text = full_text[:12000]
-        
-        # First, run the heuristic/hint extraction (Tables + Patterns)
+        # Stage 1: Fast heuristic extraction (Tables + Regex + NER) - NO LLM calls
         hints_1571 = self._extract_1571(full_text, structured_data, use_llm=False)
-        hints_1572 = self._extract_1572(full_text, structured_data) # 1572 patterns are mostly local
+        hints_1572 = self._extract_1572(full_text, structured_data)
         
-        # Now use LLM to reconcile and fill gaps
-        consolidated = self._llm_consolidated_extract(context_text, hints_1571, hints_1572)
+        # Stage 2: SINGLE consolidated LLM call to fill ALL gaps at once
+        # Reduced context to 6KB (most FDA data is in first 2-3 pages)
+        if log_callback: log_callback("🤖 Running AI extraction (single consolidated pass)...")
+        context_text = full_text[:6000]
+        consolidated = self._llm_consolidated_extract_v2(context_text, hints_1571, hints_1572)
         
-        form_1571 = consolidated.get('fda_1571', hints_1571)
-        form_1572 = consolidated.get('fda_1572', hints_1572)
+        # Merge LLM results into hints (LLM fills gaps, doesn't overwrite existing values)
+        llm_1571 = consolidated.get('fda_1571', {})
+        llm_1572 = consolidated.get('fda_1572', {})
         
-        # Post-LLM Cleanup (light touch - trust LLM more now with improved prompt)
-        # Only reject obviously garbage values
+        form_1571 = dict(hints_1571)
+        for key, val in llm_1571.items():
+            if key in form_1571 and (not form_1571[key] or str(form_1571[key]).lower().strip() in ['none', 'null', 'unknown', 'n/a']):
+                if val and str(val).lower().strip() not in ['none', 'null', 'unknown', 'n/a']:
+                    form_1571[key] = val
+        
+        form_1572 = dict(hints_1572)
+        for key, val in llm_1572.items():
+            if key in form_1572 and (not form_1572[key] or str(form_1572[key]).lower().strip() in ['none', 'null', 'unknown', 'n/a']):
+                if val and str(val).lower().strip() not in ['none', 'null', 'unknown', 'n/a']:
+                    form_1572[key] = val
+        
+        # Post-LLM Cleanup - reject garbage values
         garbage_values = ['null', 'none', 'n/a', 'unknown', 'redacted', 'signature', 'under']
         
-        if form_1571.get('sponsor_name'):
-            sponsor = form_1571['sponsor_name'].lower().strip()
-            if sponsor in garbage_values:
-                form_1571['sponsor_name'] = None
-        
-        if form_1571.get('drug_name'):
-            drug = form_1571['drug_name'].lower().strip()
-            if drug in garbage_values:
-                form_1571['drug_name'] = None
+        for field in ['sponsor_name', 'drug_name', 'contact_person', 'contact_phone', 'contact_email']:
+            val = form_1571.get(field)
+            if val and val.lower().strip() in garbage_values:
+                form_1571[field] = None
                 
         if form_1572.get('investigator_name'):
             inv = form_1572['investigator_name'].lower().strip()
             if inv in garbage_values:
                 form_1572['investigator_name'] = None
         
+        # Final clean for all string fields
+        for k, v in form_1571.items():
+            if isinstance(v, str):
+                form_1571[k] = self._clean_merged_text(v)
+        for k, v in form_1572.items():
+            if isinstance(v, str):
+                form_1572[k] = self._clean_merged_text(v)
         
         # Stage 3: Validation
         if log_callback: log_callback("✅ Validating extraction accuracy...")
@@ -343,12 +359,15 @@ class FDAProcessor:
         # Field mappings for common protocol table fields
         field_mappings = {
             'protocol_number': ['protocol number', 'protocol id', 'study id', 'nct', 'study number'],
-            'drug_name': ['name of product', 'drug', 'investigational product', 'finished product', 'active ingredient'],
+            'drug_name': ['name of product', 'investigational product', 'finished product', 'active ingredient', 'investigational medicinal product'],
+            'drug_class': ['drug class'],
             'sponsor_name': ['sponsor', 'research initiating unit', 'name of sponsor'],
             'indication': ['indication', 'clinical indication'],
             'study_phase': ['phase'],
             'protocol_title': ['short title', 'protocol title', 'study title'],
             'investigator_name': ['coordinating investigator', 'principal investigator', 'national coordinating', 'study director', 'invaestigator'],
+            'contact_phone': ['telephone', 'phone', 'tel'],
+            'contact_email': ['email', 'e-mail'],
         }
         
         last_key = None
@@ -418,6 +437,8 @@ class FDAProcessor:
             "sponsor_name": None,
             "sponsor_address": None,
             "contact_person": None,
+            "contact_phone": None,
+            "contact_email": None,
         }
         
         # Priority 1: Use structured data from tables
@@ -606,17 +627,17 @@ class FDAProcessor:
             # Fallback to patterns if NER fails
             if not result['drug_name']:
                 patterns = [
+                    r'(?i)Name\s+of\s+product\(?s?\)?[:\s\n]+([\s\S]+?)(?=\n\s*(?:Drug\s+Class|Phase|EudraCT|Indication|Sponsor|$))',
+                    r'(?i)Finished\s+Product[:\s\n]+([\s\S]+?)(?=\n\s*(?:Drug\s+Class|Phase|EudraCT|Indication|Sponsor|Active|$))',
                     r'(?i)Active\s+Ingredient[:\s]+(.+?)(?=\n|$)',
-                    r'(?i)Finished\s+Product[:\s\n]+([\s\S]+?)(?=\n\s*(?:Drug|Phase|EudraCT|Indication|Sponsor|$))',
-                    r'(?i)Name\s+of\s+product\(s\)[:\s\n]+([\s\S]+?)(?=\n\s*(?:Drug|Phase|EudraCT|Indication|Sponsor|$))',
-                    r'(?i)Finished\s+Product[:\s]+(.+?)(?=\n|Active)',
+                    r'(?i)Investigational\s+(?:Medicinal\s+)?Product[:\s\n]+([\s\S]+?)(?=\n\s*(?:Drug|Phase|EudraCT|Indication|Sponsor|$))',
                     r'(?i)Drug\s+Product[:\s]+(.+?)(?=\n|$)',
                     r'(?i)Investigational\s+Drug[:\s]+(.+?)(?=\n|$)',
                     r'(?i)Study\s+Drug[:\s]+(.+?)(?=\n|$)',
                     r'(?i)Name\s+of\s+Drug[:\s]+(.+?)(?=\n|$)'
                 ]
                 for pattern in patterns:
-                    match = self._extract_pattern(text, pattern, max_length=100)
+                    match = self._extract_pattern(text, pattern, max_length=300)
                     if match:
                         result['drug_name'] = match
                         break
@@ -629,10 +650,21 @@ class FDAProcessor:
                  result['sponsor_name'] = None
 
         if not result['dosage_form']:
-            dosage_forms = ['tablet', 'capsule', 'injection', 'solution', 'oral', 'intravenous']
-            for form in dosage_forms:
-                if re.search(fr'\b{form}\b', text, re.IGNORECASE):
-                    result['dosage_form'] = form.capitalize()
+            # Search for dosage form near product/drug description (first 5000 chars)
+            # Priority order: specific forms first, generic last
+            dosage_forms = [
+                ('Tablet', r'\btablets?\b'),
+                ('Capsule', r'\bcapsules?\b'),
+                ('Injection', r'\binjections?\b'),
+                ('Suspension', r'\bsuspensions?\b'),
+                ('Powder', r'\bpowder\b'),
+                ('Cream', r'\bcream\b'),
+                ('Solution', r'\b(?:oral\s+)?solution\b'),
+            ]
+            search_text = text[:5000]
+            for form_name, pattern in dosage_forms:
+                if re.search(pattern, search_text, re.IGNORECASE):
+                    result['dosage_form'] = form_name
                     break
         
         if not result['route_of_administration']:
@@ -700,8 +732,36 @@ class FDAProcessor:
             result['contact_person'] = self._llm_extract_field(
                 'contact_person',
                 text,
-                "Extract the sponsor's medical expert, responsible personnel, or contact person name."
+                "Extract the sponsor's medical expert, responsible personnel, or contact person name. Return ONLY the person's name (e.g. 'John Smith'), NOT a label or section heading."
             )
+        
+        # Validate contact_person - reject if it looks like a label/heading
+        if result['contact_person']:
+            cp = result['contact_person']
+            label_indicators = ['name, title', 'address, and telephone', 'telephone number', 'sponsor\'s medical', 'responsible for', 'name of the']
+            if any(ind in cp.lower() for ind in label_indicators) or len(cp) > 120:
+                print(f"⚠️ Rejecting contact_person '{cp[:60]}...' - looks like a label, not a name")
+                result['contact_person'] = None
+
+        # Extract contact phone from text
+        if not result['contact_phone']:
+            phone_patterns = [
+                r'(?i)(?:Phone|Tel|Telephone)[:\s]*(\+?[\d\s\-\(\)]{7,20})',
+                r'(\+\d{1,3}[\s\-]?\d{1,4}[\s\-]?\d{3,4}[\s\-]?\d{3,4})',
+            ]
+            for pattern in phone_patterns:
+                match = re.search(pattern, text[:10000])
+                if match:
+                    phone = match.group(1).strip()
+                    if len(re.sub(r'[^\d]', '', phone)) >= 7:
+                        result['contact_phone'] = phone
+                        break
+
+        # Extract contact email from text
+        if not result['contact_email']:
+            email_match = re.search(r'[\w.+-]+@[\w-]+\.[\w.-]+', text[:10000])
+            if email_match:
+                result['contact_email'] = email_match.group(0)
         
         # Final clean for all string fields
         for k, v in result.items():
@@ -710,91 +770,80 @@ class FDAProcessor:
         
         return result
     
-    def _llm_consolidated_extract(self, context_text: str, hints_1571: Dict, hints_1572: Dict) -> Dict:
+    def _llm_consolidated_extract_v2(self, context_text: str, hints_1571: Dict, hints_1572: Dict) -> Dict:
         """
-        Final consolidated LLM extraction.
-        Uses context from first pages + hints from heuristic extraction.
+        SINGLE consolidated LLM call that extracts ALL fields at once.
+        Replaces the old approach of 5-7 separate LLM calls.
         """
-        prompt = f"""
-You are a Clinical Trial Protocol extractor. Extract ONLY the requested fields from the text.
+        # Build a compact hints summary (only non-null values)
+        compact_hints = {}
+        for k, v in hints_1571.items():
+            if v:
+                compact_hints[k] = v
+        for k, v in hints_1572.items():
+            if v:
+                compact_hints[f"inv_{k}"] = v
 
-TEXT CONTEXT:
+        prompt = f"""You are a Clinical Trial Protocol extractor. Extract ALL fields from this document. DO NOT HALLUCINATE.
+
+TEXT (first pages):
 {context_text}
 
-HINTS (Preliminary Extraction - may contain errors):
-1571: {json.dumps(hints_1571)}
-1572: {json.dumps(hints_1572)}
+PRELIMINARY HINTS (from pattern matching - verify against text):
+{json.dumps(compact_hints)}
 
-EXTRACT THE FOLLOWING FIELDS:
+Extract ALL of these fields. Return null if not found in the text.
 
-1. SPONSOR_NAME: The pharmaceutical COMPANY sponsoring the trial.
-   - Look for "Inc.", "Ltd.", "Corp.", "Pharmaceuticals"
-   - Example: "Cumberland Pharmaceuticals Inc." or "DNDi"
-   - DO NOT include drug names in the sponsor field
+IMPORTANT RULES:
+- "drug_name" must be the actual product/drug name(s) from "Name of product(s)" or "Investigational Product" fields. Do NOT use "Drug Class" as the drug name.
+- "contact_person" must be an actual person's name, NOT a label like "Name, title, address..." or a section heading.
+- "contact_phone" must be an actual phone number with digits, NOT a label.
+- "contact_email" must be an actual email address, NOT a label.
 
-2. DRUG_NAME: The investigational product/drug being studied.
-   - Look for the active ingredient or brand name
-   - Example: "CALDOLOR" or "ibuprofen" or "Fexinidazole"
-   - DO NOT include the company name
-
-3. INDICATION: The medical condition being treated.
-   - Look for disease, symptom, or condition
-   - Example: "Fever", "Pain", "Human African Trypanosomiasis"
-
-4. INVESTIGATOR_NAME: The Principal Investigator's full name (a PERSON).
-   - Example: "John Smith, MD" or "Dr. Jane Doe"
-   - Return null if no specific person name is found
-
-5. PROTOCOL_TITLE: The full title of the study.
-
-6. PROTOCOL_NUMBER: The study identifier.
-   - Example: "CPI-CL-022" or "NCT02583399"
-
-7. STUDY_PHASE: The clinical trial phase.
-   - Example: "Phase 1", "Phase 2", "Phase 3", "Phase 4"
-
-8. ROUTE_OF_ADMINISTRATION: How the drug is given.
-   - Example: "Intravenous", "Oral", "Subcutaneous"
-
-Return ONLY valid JSON in this exact format:
+Return ONLY valid JSON:
 {{
   "fda_1571": {{
-    "sponsor_name": "...",
-    "drug_name": "...",
-    "indication": "...",
-    "protocol_title": "...",
-    "protocol_number": "...",
-    "study_phase": "...",
-    "route_of_administration": "...",
-    "dosage_form": "..."
+    "sponsor_name": "Pharmaceutical company name",
+    "sponsor_address": "Full address of sponsor",
+    "contact_person": "Actual person name (sponsor medical expert or contact)",
+    "contact_phone": "Phone number with digits",
+    "contact_email": "Email address",
+    "drug_name": "Product name(s) from 'Name of product(s)' field, NOT drug class",
+    "dosage_form": "tablet/capsule/injection/solution",
+    "route_of_administration": "Oral/Intravenous/Subcutaneous",
+    "indication": "Specific medical condition",
+    "study_phase": "Phase 1/2/3/4",
+    "protocol_title": "Full official study title",
+    "protocol_number": "Study identifier (NCT/protocol number)",
+    "ind_number": "IND number if present",
+    "submission_type": "Initial/Amendment"
   }},
   "fda_1572": {{
-    "investigator_name": "...",
-    "protocol_number": "..."
+    "investigator_name": "Principal Investigator (PERSON name only)",
+    "investigator_address": "Investigator institution and address",
+    "protocol_number": "Same protocol number",
+    "irb_name": "IRB or Ethics Committee name"
   }}
-}}
-
-JSON:
-"""
+}}"""
         try:
-            print(f"🤖 Calling LLM for consolidated extraction...")
+            print(f"🤖 Calling LLM for consolidated extraction (single pass)...")
             response = self.llm.invoke(prompt).strip()
             data = self._parse_llm_json(response)
             
             if data:
-                print(f"✅ LLM Consolidated Extraction successful")
+                print(f"✅ LLM Consolidated Extraction V2 successful")
                 # Merge back hints ONLY if LLM returned null or empty for a field
                 for form in ['fda_1571', 'fda_1572']:
-                    if form not in data: data[form] = {}
+                    if form not in data:
+                        data[form] = {}
                     hints = hints_1571 if form == 'fda_1571' else hints_1572
                     for k, v in hints.items():
                         llm_val = data[form].get(k)
-                        # If LLM returned null or very short value, and hint is better
-                        if (not llm_val or len(str(llm_val)) < 3) and v:
+                        if (not llm_val or str(llm_val).lower() in ['null', 'none', '']) and v:
                             data[form][k] = v
                 return data
         except Exception as e:
-            print(f"⚠️  Consolidated extraction failed: {e}")
+            print(f"⚠️  Consolidated extraction V2 failed: {e}")
         return {"fda_1571": hints_1571, "fda_1572": hints_1572}
 
     def _extract_1572(self, text: str, structured_data: Dict) -> Dict:
@@ -915,7 +964,7 @@ JSON:
         
         # Extract IRB
         irb_match = re.search(
-            r'(?i)(?:IRB|Ethics\\s+Committee|Institutional\\s+Review\\s+Board)[:\\s]+(.+?)(?:\\n|$)',
+            r'(?i)(?:IRB|Ethics\s+Committee|Institutional\s+Review\s+Board)\s*[:\s]+(.+?)(?:\n|$)',
             text[:20000]
         )
         if irb_match:
@@ -924,61 +973,98 @@ JSON:
         return result
     
     def _extract_sites(self, text: str) -> List[Dict]:
-        """Extract clinical trial sites"""
+        """Extract clinical trial sites from protocol text"""
         sites = []
         
-        # Find the section with site information
+        # Strategy 1: Find explicit site section
         site_section = re.search(
-            r'(?i)(?:trial\\s+site|clinical\\s+site|address.*trial\\s+site)[s]?[:\\s]+(.*?)(?=\\n\\s*Name|\\n{3,}|$)',
+            r'(?i)(?:trial\s+site|clinical\s+site|study\s+site|address.*trial\s+site)s?\s*[:\s]+(.*?)(?=\n\s*\d+\.\s+[A-Z]|\n{3,}|$)',
             text[:30000],
             re.DOTALL
         )
         
         if site_section:
             site_text = site_section.group(1)[:3000]
-            doc = self.nlp(site_text)
+            doc = self.nlp_general(site_text)
             
             for ent in doc.ents:
-                if ent.label_ in ['ORG', 'FAC'] and len(ent.text) > 5:
+                if ent.label_ in ['ORG', 'FAC', 'GPE'] and len(ent.text) > 5:
                     sites.append({
                         "site_name": ent.text,
                         "site_address": None
                     })
         
-        return sites[:10]
+        # Strategy 2: Look for "Appendix" references to PI list
+        if not sites:
+            appendix_match = re.search(
+                r'(?i)(?:Appendix\s+\d*\s*[-–]?\s*Principal\s+Investigators?|list\s+of\s+(?:principal\s+)?investigators?)',
+                text[:30000]
+            )
+            if appendix_match:
+                # Extract location mentions near investigator sections
+                inv_section = text[max(0, appendix_match.start()-200):appendix_match.start()+2000]
+                doc = self.nlp_general(inv_section)
+                for ent in doc.ents:
+                    if ent.label_ in ['GPE', 'LOC'] and len(ent.text) > 3:
+                        sites.append({
+                            "site_name": ent.text,
+                            "site_address": None
+                        })
+        
+        # Deduplicate
+        seen = set()
+        unique_sites = []
+        for s in sites:
+            key = s['site_name'].lower()
+            if key not in seen:
+                seen.add(key)
+                unique_sites.append(s)
+        
+        return unique_sites[:10]
     
     def _extract_laboratories(self, text: str) -> List[Dict]:
         """Extract clinical laboratories from CONTACT DETAILS section"""
         labs = []
         
-        # Find laboratory section
-        lab_section = re.search(
-            r'(?i)clinical\\s+laborator(?:y|ies)[:\\s]+(.*?)(?=\\n\\s*[A-Z][a-z]+:|\\n{3,}|$)',
-            text[:30000],
-            re.DOTALL
+        # Find laboratory/lab sections in the text
+        lab_patterns = [
+            r'(?i)(?:clinical\s+)?laborator(?:y|ies)\s*[:\s]+(.*?)(?=\n\s*(?:\d+\.\s+[A-Z]|SIGNATURES|ABBREVIATIONS)|\n{3,})',
+            r'(?i)(?:PCR\s+Analysis|Quality\s+Control\s+PCR|PK\s+Analysis)\s*\n(.*?)(?=\n\s*(?:[A-Z][a-z]+:|\d+\.\s+[A-Z])|\n{3,})',
+        ]
+        
+        for pattern in lab_patterns:
+            for match in re.finditer(pattern, text[:15000], re.DOTALL):
+                lab_text = match.group(1).strip()[:500]
+                if len(lab_text) > 10:
+                    # Use NER to extract organization names
+                    doc = self.nlp_general(lab_text)
+                    for ent in doc.ents:
+                        if ent.label_ in ['ORG', 'FAC'] and len(ent.text) > 5:
+                            labs.append({
+                                "lab_name": ent.text,
+                                "lab_address": None
+                            })
+        
+        # Also try to find lab names by pattern
+        lab_name_matches = re.findall(
+            r'(?i)((?:Laboratorio|Laboratory|Institut[eo]|Centro|Departamento|Núcleo)\s+[^\n]{5,60})',
+            text[:15000]
         )
+        for name in lab_name_matches:
+            name = name.strip()
+            if name and len(name) > 10:
+                labs.append({"lab_name": name, "lab_address": None})
         
-        if lab_section:
-            lab_text = lab_section.group(1)[:2000]
-            
-            # Split by country or newlines
-            lab_entries = re.split(r'\\n(?=[A-Z][a-z]+\\s+Laboratory|[A-Z]{2,}\\s*$)', lab_text)
-            
-            for entry in lab_entries:
-                entry = entry.strip()
-                if len(entry) > 10:
-                    # Extract lab name (first line usually)
-                    lines = entry.split('\\n')
-                    lab_name = lines[0].strip()
-                    lab_address = ' '.join(lines[1:]).strip() if len(lines) > 1 else None
-                    
-                    if lab_name:
-                        labs.append({
-                            "lab_name": lab_name,
-                            "lab_address": lab_address
-                        })
+        # Deduplicate
+        seen = set()
+        unique_labs = []
+        for lab in labs:
+            key = lab['lab_name'].lower()[:30]
+            if key not in seen:
+                seen.add(key)
+                unique_labs.append(lab)
         
-        return labs[:10]
+        return unique_labs[:10]
     
     def _extract_pattern(self, text: str, pattern: str, max_length: int = 100) -> Optional[str]:
         """Extract text using regex pattern"""

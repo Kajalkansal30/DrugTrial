@@ -11,9 +11,10 @@ until curl -s http://localhost:11434/api/tags > /dev/null; do
 done
 echo "✅ Ollama server is up!"
 
-# Pull the model if not already present
-echo "📥 Ensuring llama3.1 is available..."
-ollama pull llama3.1
+# Pull the model (configurable via OLLAMA_MODEL env var)
+MODEL=${OLLAMA_MODEL:-"llama3.1"}
+echo "📥 Ensuring ${MODEL} is available..."
+ollama pull ${MODEL}
 
 # Start the FastAPI application
 echo "🌐 Starting FastAPI application on port $PORT..."

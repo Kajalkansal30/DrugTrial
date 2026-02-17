@@ -104,8 +104,8 @@ const CriteriaPage = () => {
         return (
             <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', minHeight: '60vh' }}>
                 <CircularProgress size={60} thickness={4} sx={{ mb: 2 }} />
-                <Typography variant="h6" color="textSecondary">AI Agent extracting structured rules...</Typography>
-                <Typography variant="body2" color="textSecondary" sx={{ mt: 1 }}>Using scispaCy + Llama 3.1 for dynamic medical term detection</Typography>
+                <Typography variant="h6" color="textSecondary">Loading extracted criteria...</Typography>
+                <Typography variant="body2" color="textSecondary" sx={{ mt: 1 }}>Fetching pre-processed eligibility rules from database</Typography>
             </Box>
         );
     }

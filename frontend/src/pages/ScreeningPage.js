@@ -2,9 +2,9 @@ import React, { useState, useEffect } from 'react';
 import {
     Box, Typography, Button, Paper, Table, TableBody, TableCell,
     TableContainer, TableHead, TableRow, Chip, Card, CardContent,
-    CircularProgress, LinearProgress, Alert
+    CircularProgress, LinearProgress, Alert, Tooltip
 } from '@mui/material';
-import { VerifiedUser, Group, Analytics, FactCheck, HelpCenter } from '@mui/icons-material';
+import { VerifiedUser, Group, Analytics, FactCheck, HelpCenter, Refresh, Warning } from '@mui/icons-material';
 import axios from 'axios';
 import { useParams } from 'react-router-dom';
 import TrialAnalysisSidebar from '../components/TrialAnalysisSidebar';
@@ -16,9 +16,9 @@ const ScreeningPage = ({ trialData }) => {
     const [matching, setMatching] = useState(false);
     const [progress, setProgress] = useState(0);
     const [stats, setStats] = useState({ total: 0, eligible: 0, potential: 0, uncertain: 0, ineligible: 0 });
-    const [filterStatus, setFilterStatus] = useState('ALL'); // NEW: Filter state
+    const [filterStatus, setFilterStatus] = useState('ALL');
 
-
+    const [screeningDone, setScreeningDone] = useState(false);
     const [selectedPatient, setSelectedPatient] = useState(null);
     const [analysisOpen, setAnalysisOpen] = useState(false);
     const [currentAnalysis, setCurrentAnalysis] = useState(null);
@@ -30,10 +30,10 @@ const ScreeningPage = ({ trialData }) => {
     }, [trialId]);
 
     useEffect(() => {
-        if (patients.length > 0 && !matching && stats.eligible === 0 && stats.ineligible === 0) {
+        if (patients.length > 0 && !matching && !screeningDone) {
             runFullScreening();
         }
-    }, [patients]);
+    }, [patients, screeningDone]);
 
     const fetchData = async () => {
         try {
@@ -52,7 +52,7 @@ const ScreeningPage = ({ trialData }) => {
     const runFullScreening = async () => {
         if (matching) return;
         setMatching(true);
-        setProgress(0); // Optional: intermediate progress if needed, or just 0->100
+        setProgress(0);
 
         try {
             const trialRes = await axios.get(`${API_URL}/api/trials/${trialId}/rules`);
@@ -64,11 +64,7 @@ const ScreeningPage = ({ trialData }) => {
                 return;
             }
 
-            // Gather all patient IDs
             const patientIds = patients.map(p => p.id);
-
-            // Call Batch API
-            // Simulate progress start
             setProgress(10);
 
             const res = await axios.post(`${API_URL}/api/eligibility/batch-check`, {
@@ -79,8 +75,6 @@ const ScreeningPage = ({ trialData }) => {
             setProgress(80);
 
             const results = res.data.results;
-            // Update all patients state at once
-            // Update patients and calculate stats synchronously to avoid race conditions
             let counts = { highly: 0, potential: 0, uncertain: 0, ineligible: 0 };
             const updatedPatients = patients.map(p => {
                 const result = results[p.id];
@@ -93,7 +87,7 @@ const ScreeningPage = ({ trialData }) => {
 
                     return {
                         ...p, eligibility: {
-                            eligibility_status: result.status, // Use specific status from backend
+                            eligibility_status: result.status,
                             confidence_score: result.confidence,
                             reasons: result.reasons
                         }
@@ -112,14 +106,15 @@ const ScreeningPage = ({ trialData }) => {
             });
 
             setProgress(100);
+            setScreeningDone(true);
 
         } catch (err) {
             console.error("Screening batch error", err);
-            // Optionally set error state for all or alert user
             setPatients(prev => prev.map(p => ({
                 ...p,
                 eligibility: { eligibility_status: 'error', reasons: { error: "Batch Screen Failed" } }
             })));
+            setScreeningDone(true);
         } finally {
             setMatching(false);
         }
@@ -130,7 +125,7 @@ const ScreeningPage = ({ trialData }) => {
         const s = status.toUpperCase();
         if (s.includes('HIGHLY')) return 'success';
         if (s.includes('POTENTIALLY')) return 'warning';
-        if (s.includes('UNCERTAIN')) return 'default'; // Changed from 'error' to 'default' (Grey)
+        if (s.includes('UNCERTAIN')) return 'default';
         if (s.includes('INELIGIBLE')) return 'error';
         if (s.includes('ERROR')) return 'error';
         return 'default';
@@ -160,13 +155,12 @@ const ScreeningPage = ({ trialData }) => {
         return false;
     });
 
-    // Professional Color Palette
     const COLORS = {
-        eligible: { bg: '#ecfdf5', text: '#065f46', border: '#10b981' }, // Emerald
-        potential: { bg: '#fffbeb', text: '#92400e', border: '#f59e0b' }, // Amber
-        uncertain: { bg: '#f8fafc', text: '#475569', border: '#94a3b8' }, // Slate
-        ineligible: { bg: '#fff1f2', text: '#be123c', border: '#e11d48' }, // Rose
-        info: { bg: '#eff6ff', text: '#1e40af', border: '#3b82f6' }      // Blue
+        eligible: { bg: '#ecfdf5', text: '#065f46', border: '#10b981' },
+        potential: { bg: '#fffbeb', text: '#92400e', border: '#f59e0b' },
+        uncertain: { bg: '#f8fafc', text: '#475569', border: '#94a3b8' },
+        ineligible: { bg: '#fff1f2', text: '#be123c', border: '#e11d48' },
+        info: { bg: '#eff6ff', text: '#1e40af', border: '#3b82f6' }
     };
 
     const StatusChip = ({ status }) => {
@@ -185,61 +179,60 @@ const ScreeningPage = ({ trialData }) => {
                     color: style.text,
                     fontWeight: 700,
                     fontSize: '0.7rem',
-                    border: `1px solid ${style.border}40`, // 40 hex opacity
+                    border: `1px solid ${style.border}40`,
                     height: 24
                 }}
             />
         );
     };
 
+    const getInclusionLabel = (reasons) => {
+        if (!reasons?.inclusion_details) return '-';
+        const met = reasons.inclusion_details.filter(d => d.met).length;
+        const total = reasons.inclusion_details.length;
+        return `${met}/${total}`;
+    };
+
+    const getExclusionLabel = (reasons) => {
+        if (!reasons?.exclusion_details) return '-';
+        const triggered = reasons.exclusion_details.filter(d => d.met).length;
+        return triggered > 0 ? `${triggered} triggered` : 'Clear';
+    };
+
+    const hasScreeningRun = patients.some(p => p.eligibility);
+
     return (
         <Box>
-            <Typography variant="h5" sx={{ fontWeight: 800, color: '#102a43', mb: 1 }}>Eligible Patient Dashboard</Typography>
-            <Typography variant="body1" color="textSecondary" sx={{ mb: 4 }}>
-                Real-time screening results across the {stats.total} patient cohort.
-            </Typography>
+            <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', mb: 1 }}>
+                <Box>
+                    <Typography variant="h5" sx={{ fontWeight: 800, color: '#102a43' }}>Eligible Patient Dashboard</Typography>
+                    <Typography variant="body1" color="textSecondary" sx={{ mb: 2 }}>
+                        Real-time screening results across the {stats.total} patient cohort.
+                    </Typography>
+                </Box>
+                {hasScreeningRun && !matching && (
+                    <Button
+                        variant="outlined"
+                        startIcon={<Refresh />}
+                        onClick={() => { setScreeningDone(false); setTimeout(runFullScreening, 0); }}
+                        sx={{ textTransform: 'none', fontWeight: 600, borderRadius: 2 }}
+                    >
+                        Re-run Screening
+                    </Button>
+                )}
+            </Box>
 
             <Box sx={{ display: 'flex', gap: 2, mb: 4 }}>
-                <StatCard
-                    title="Total Cohort"
-                    count={stats.total}
-                    icon={<Group />}
-                    theme={COLORS.info}
-                    isActive={filterStatus === 'ALL'}
-                    onClick={() => handleFilter('ALL')}
-                />
-                <StatCard
-                    title="Highly Eligible"
-                    count={stats.eligible}
-                    icon={<VerifiedUser />}
-                    theme={COLORS.eligible}
-                    isActive={filterStatus === 'HIGHLY'}
-                    onClick={() => handleFilter('HIGHLY')}
-                />
-                <StatCard
-                    title="Potentially Eligible"
-                    count={stats.potential}
-                    icon={<FactCheck />}
-                    theme={COLORS.potential}
-                    isActive={filterStatus === 'POTENTIALLY'}
-                    onClick={() => handleFilter('POTENTIALLY')}
-                />
-                <StatCard
-                    title="Needs Review"
-                    count={stats.uncertain}
-                    icon={<HelpCenter />}
-                    theme={COLORS.uncertain}
-                    isActive={filterStatus === 'UNCERTAIN'}
-                    onClick={() => handleFilter('UNCERTAIN')}
-                />
-                <StatCard
-                    title="Ineligible"
-                    count={stats.ineligible}
-                    icon={<Analytics />}
-                    theme={COLORS.ineligible}
-                    isActive={filterStatus === 'INELIGIBLE'}
-                    onClick={() => handleFilter('INELIGIBLE')}
-                />
+                <StatCard title="Total Cohort" count={stats.total} icon={<Group />}
+                    theme={COLORS.info} isActive={filterStatus === 'ALL'} onClick={() => handleFilter('ALL')} />
+                <StatCard title="Highly Eligible" count={stats.eligible} icon={<VerifiedUser />}
+                    theme={COLORS.eligible} isActive={filterStatus === 'HIGHLY'} onClick={() => handleFilter('HIGHLY')} />
+                <StatCard title="Potentially Eligible" count={stats.potential} icon={<FactCheck />}
+                    theme={COLORS.potential} isActive={filterStatus === 'POTENTIALLY'} onClick={() => handleFilter('POTENTIALLY')} />
+                <StatCard title="Needs Review" count={stats.uncertain} icon={<HelpCenter />}
+                    theme={COLORS.uncertain} isActive={filterStatus === 'UNCERTAIN'} onClick={() => handleFilter('UNCERTAIN')} />
+                <StatCard title="Ineligible" count={stats.ineligible} icon={<Analytics />}
+                    theme={COLORS.ineligible} isActive={filterStatus === 'INELIGIBLE'} onClick={() => handleFilter('INELIGIBLE')} />
             </Box>
 
             {matching && (
@@ -258,36 +251,86 @@ const ScreeningPage = ({ trialData }) => {
                             <TableCell sx={{ fontWeight: 800, color: '#475569' }}>Patient ID</TableCell>
                             <TableCell sx={{ fontWeight: 800, color: '#475569' }}>Match Status</TableCell>
                             <TableCell sx={{ fontWeight: 800, color: '#475569' }}>Confidence</TableCell>
+                            <TableCell sx={{ fontWeight: 800, color: '#475569' }}>
+                                <Tooltip title="Inclusion criteria met out of total"><span>Inclusions</span></Tooltip>
+                            </TableCell>
+                            <TableCell sx={{ fontWeight: 800, color: '#475569' }}>
+                                <Tooltip title="Exclusion criteria triggered"><span>Exclusions</span></Tooltip>
+                            </TableCell>
+                            <TableCell sx={{ fontWeight: 800, color: '#475569' }}>
+                                <Tooltip title="Percentage of criteria with available patient data"><span>Data</span></Tooltip>
+                            </TableCell>
                             <TableCell sx={{ fontWeight: 800, color: '#475569' }}>Actions</TableCell>
                         </TableRow>
                     </TableHead>
                     <TableBody>
                         {loading ? (
-                            <TableRow><TableCell colSpan={4} align="center"><CircularProgress /></TableCell></TableRow>
+                            <TableRow><TableCell colSpan={7} align="center"><CircularProgress /></TableCell></TableRow>
                         ) : (
-                            filteredPatients.map((patient) => (
-                                <TableRow key={patient.id} hover>
-                                    <TableCell sx={{ fontWeight: 600 }}>{patient.id}</TableCell>
-                                    <TableCell>
-                                        <StatusChip status={patient.eligibility?.eligibility_status || 'Waiting...'} />
-                                    </TableCell>
-                                    <TableCell>
-                                        <Typography variant="body2" sx={{ fontWeight: 700, color: '#334155' }}>
-                                            {patient.eligibility ? `${(patient.eligibility.confidence_score * 100).toFixed(0)}%` : '-'}
-                                        </Typography>
-                                    </TableCell>
-                                    <TableCell>
-                                        <Button
-                                            size="small"
-                                            variant="outlined"
-                                            onClick={() => viewAnalysis(patient)}
-                                            sx={{ borderRadius: 2, textTransform: 'none', fontWeight: 600 }}
-                                        >
-                                            View Analysis
-                                        </Button>
-                                    </TableCell>
-                                </TableRow>
-                            ))
+                            filteredPatients.map((patient) => {
+                                const elig = patient.eligibility;
+                                const reasons = elig?.reasons;
+                                const excTriggered = reasons?.exclusion_details?.filter(d => d.met).length || 0;
+
+                                return (
+                                    <TableRow key={patient.id} hover>
+                                        <TableCell sx={{ fontWeight: 600 }}>{patient.id}</TableCell>
+                                        <TableCell>
+                                            <StatusChip status={elig?.eligibility_status || 'Waiting...'} />
+                                        </TableCell>
+                                        <TableCell>
+                                            <Typography variant="body2" sx={{ fontWeight: 700, color: '#334155' }}>
+                                                {elig ? `${(elig.confidence_score * 100).toFixed(0)}%` : '-'}
+                                            </Typography>
+                                        </TableCell>
+                                        <TableCell>
+                                            <Typography variant="body2" sx={{
+                                                fontWeight: 600,
+                                                color: reasons?.inclusion_score >= 0.8 ? '#065f46' :
+                                                       reasons?.inclusion_score >= 0.5 ? '#92400e' : '#475569'
+                                            }}>
+                                                {getInclusionLabel(reasons)}
+                                            </Typography>
+                                        </TableCell>
+                                        <TableCell>
+                                            {excTriggered > 0 ? (
+                                                <Chip
+                                                    icon={<Warning sx={{ fontSize: 14 }} />}
+                                                    label={`${excTriggered}`}
+                                                    size="small"
+                                                    sx={{
+                                                        bgcolor: '#fff1f2', color: '#be123c',
+                                                        fontWeight: 700, fontSize: '0.7rem', height: 22,
+                                                        border: '1px solid #fecdd3'
+                                                    }}
+                                                />
+                                            ) : (
+                                                <Typography variant="body2" sx={{ color: '#065f46', fontWeight: 600 }}>
+                                                    {reasons ? 'Clear' : '-'}
+                                                </Typography>
+                                            )}
+                                        </TableCell>
+                                        <TableCell>
+                                            <Typography variant="body2" sx={{
+                                                fontWeight: 600,
+                                                color: (reasons?.data_completeness || 0) >= 0.7 ? '#065f46' : '#92400e'
+                                            }}>
+                                                {reasons ? `${(reasons.data_completeness * 100).toFixed(0)}%` : '-'}
+                                            </Typography>
+                                        </TableCell>
+                                        <TableCell>
+                                            <Button
+                                                size="small"
+                                                variant="outlined"
+                                                onClick={() => viewAnalysis(patient)}
+                                                sx={{ borderRadius: 2, textTransform: 'none', fontWeight: 600 }}
+                                            >
+                                                View Analysis
+                                            </Button>
+                                        </TableCell>
+                                    </TableRow>
+                                );
+                            })
                         )}
                     </TableBody>
                 </Table>
@@ -307,7 +350,7 @@ const ScreeningPage = ({ trialData }) => {
 const StatCard = ({ title, count, icon, theme, onClick, isActive }) => (
     <Card sx={{
         flex: 1,
-        bgcolor: isActive ? theme.bg : 'white', // Highlight active card
+        bgcolor: isActive ? theme.bg : 'white',
         borderLeft: `5px solid ${theme.border}`,
         boxShadow: isActive ? `0 0 0 2px ${theme.border}` : '0 2px 4px rgba(0,0,0,0.05)',
         cursor: 'pointer',

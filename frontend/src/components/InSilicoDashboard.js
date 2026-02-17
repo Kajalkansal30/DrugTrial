@@ -30,27 +30,41 @@ const MetricItem = ({ label, value, sub, color }) => (
     </Grid>
 );
 
-const InSilicoDashboard = ({ trialId, indication }) => {
+const InSilicoDashboard = ({ trialId, indication, isActive, onDataLoaded }) => {
     const [loading, setLoading] = useState(true);
     const [data, setData] = useState(null);
     const [error, setError] = useState(null);
+    const [polling, setPolling] = useState(false);
+    const fetchedRef = React.useRef(false);
 
     useEffect(() => {
+        if (!isActive || !trialId || fetchedRef.current) return;
+
         const fetchData = async () => {
             try {
-                // 1. Try to fetch cached results
                 const cacheRes = await axios.get(`${API_BASE}/api/insilico/results/${trialId}`);
                 if (cacheRes.data.status === 'ready') {
                     setData(cacheRes.data);
                     setLoading(false);
+                    fetchedRef.current = true;
+                    if (onDataLoaded) onDataLoaded(cacheRes.data);
                     return;
                 }
 
-                // 2. Fallback to direct analysis
-                const response = await axios.post(`${API_BASE}/api/insilico/analyze/text`, {
-                    text: indication || "Indicated for Chronic Chagas Disease."
-                });
-                setData(response.data);
+                if (cacheRes.data.status === 'not_started') {
+                    setError(cacheRes.data.message || "No trial created yet. Create a trial from this document to start analysis.");
+                    setLoading(false);
+                    return;
+                }
+
+                if (cacheRes.data.status === 'failed') {
+                    setError(cacheRes.data.message || "Analysis failed.");
+                    setLoading(false);
+                    return;
+                }
+
+                // Background task still running — show pending state and poll
+                setPolling(true);
                 setLoading(false);
             } catch (err) {
                 console.error("In Silico Load Error:", err);
@@ -59,8 +73,29 @@ const InSilicoDashboard = ({ trialId, indication }) => {
             }
         };
 
-        if (trialId) fetchData();
-    }, [trialId, indication]);
+        fetchData();
+    }, [trialId, isActive]);
+
+    // Auto-poll when results are pending
+    useEffect(() => {
+        if (!polling || !trialId || !isActive) return;
+        const interval = setInterval(async () => {
+            try {
+                const res = await axios.get(`${API_BASE}/api/insilico/results/${trialId}`);
+                if (res.data.status === 'ready') {
+                    setData(res.data);
+                    setPolling(false);
+                    fetchedRef.current = true;
+                    if (onDataLoaded) onDataLoaded(res.data);
+                }
+                if (res.data.status === 'not_started' || res.data.status === 'failed') {
+                    setPolling(false);
+                    setError(res.data.message);
+                }
+            } catch (e) { /* ignore polling errors */ }
+        }, 8000);
+        return () => clearInterval(interval);
+    }, [polling, trialId, isActive]);
 
     if (loading) return (
         <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center', py: 8 }}>
@@ -71,6 +106,14 @@ const InSilicoDashboard = ({ trialId, indication }) => {
     );
 
     if (error) return <Alert severity="info" sx={{ mt: 2, borderRadius: 2 }}>{error}</Alert>;
+
+    if (polling && !data) return (
+        <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center', py: 8 }}>
+            <CircularProgress size={60} thickness={4} />
+            <Typography variant="h6" sx={{ mt: 2 }}>In Silico Analysis Running in Background...</Typography>
+            <Typography variant="body2" color="text.secondary">Results will appear automatically when ready. Checking every 8 seconds.</Typography>
+        </Box>
+    );
 
     if (data && data.error) return (
         <Alert severity="warning" icon={<HelpOutline />} sx={{ mt: 2, borderRadius: 2 }}>

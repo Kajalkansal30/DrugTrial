@@ -1,5 +1,3 @@
-import spacy
-from scispacy.linking import EntityLinker
 import logging
 from typing import List, Dict, Any
 
@@ -8,13 +6,9 @@ logger = logging.getLogger(__name__)
 class MolecularTargetAgent:
     def __init__(self):
         try:
-            # Load the large SciSpaCy model
-            self.nlp = spacy.load("en_core_sci_lg")
-            # Link to UMLS for medical concepts
-            if "scispacy_linker" not in self.nlp.pipe_names:
-                # Note: Newer scispacy might have different config structure
-                self.nlp.add_pipe("scispacy_linker", config={"linker_name": "umls"})
-            logger.info("✅ MolecularTargetAgent initialized with SciSpaCy & UMLS")
+            from backend.nlp_utils import get_nlp
+            self.nlp = get_nlp("en_core_sci_lg", load_linker=True)
+            logger.info("✅ MolecularTargetAgent initialized with shared SciSpaCy & UMLS")
         except Exception as e:
             logger.error(f"Failed to load SciSpaCy model: {e}")
             self.nlp = None
@@ -22,59 +16,59 @@ class MolecularTargetAgent:
     def analyze_text(self, text: str) -> Dict[str, Any]:
         """
         Extract medical entities and link to UMLS concepts.
-        Focus on Targets (Genes/Proteins) and Chemicals.
+        Processes the entire document in chunks for complete coverage.
         """
         if not self.nlp:
             return {"error": "SciSpaCy model not loaded"}
 
-        # Process a reasonable chunk of text (or summary)
-        doc = self.nlp(text[:10000])
+        # Chunk the text into 10k segments for SciSpaCy (to avoid OOM/performance issues)
+        chunk_size = 10000
+        text_chunks = [text[i:i+chunk_size] for i in range(0, len(text), chunk_size)]
         
-        targets = []
-        chemicals = []
-        
+        all_targets = []
+        all_chemicals = []
         linker = self.nlp.get_pipe("scispacy_linker")
         
-        for ent in doc.ents:
-            # SciSpaCy entities have 'labels' or we can check UMLS types
-            # T116: Amino Acid, Peptide, or Protein (Likely a target)
-            # T121: Pharmacologic Substance (Chemical)
+        print(f"🔬 Analyzing biological targets across {len(text_chunks)} chunks...")
+        for chunk in text_chunks:
+            doc = self.nlp(chunk)
             
-            concept = None
-            if ent._.kb_ents:
-                cui, score = ent._.kb_ents[0]
-                concept = linker.kb.cui_to_entity[cui]
-                
-            data = {
-                "text": ent.text,
-                "label": ent.label_,
-                "cui": concept.concept_id if concept else None,
-                "canonical_name": concept.canonical_name if concept else ent.text,
-                "definition": concept.definition if concept else None,
-                "types": concept.types if concept else []
-            }
+            for ent in doc.ents:
+                concept = None
+                if ent._.kb_ents:
+                    cui, score = ent._.kb_ents[0]
+                    concept = linker.kb.cui_to_entity[cui]
+                    
+                data = {
+                    "text": ent.text,
+                    "label": ent.label_,
+                    "cui": concept.concept_id if concept else None,
+                    "canonical_name": concept.canonical_name if concept else ent.text,
+                    "definition": concept.definition if concept else None,
+                    "types": concept.types if concept else []
+                }
 
-            # Simple classification based on UMLS semantic types
-            if concept and any(t in concept.types for t in ["T116", "T123", "T028"]):
-                targets.append(data)
-            elif concept and any(t in concept.types for t in ["T121", "T109", "T122"]):
-                chemicals.append(data)
-            elif ent.label_ in ["CHEMICAL", "GENE_OR_GENE_PRODUCT"]:
-                if ent.label_ == "CHEMICAL": chemicals.append(data)
-                else: targets.append(data)
+                # Simple classification based on UMLS semantic types
+                if concept and any(t in concept.types for t in ["T116", "T123", "T028"]):
+                    all_targets.append(data)
+                elif concept and any(t in concept.types for t in ["T121", "T109", "T122"]):
+                    all_chemicals.append(data)
+                elif ent.label_ in ["CHEMICAL", "GENE_OR_GENE_PRODUCT"]:
+                    if ent.label_ == "CHEMICAL": all_chemicals.append(data)
+                    else: all_targets.append(data)
 
-        # Deduplicate
-        seen_targets = {}
-        unique_targets = []
-        for t in targets:
-            if t['canonical_name'] not in seen_targets:
-                seen_targets[t['canonical_name']] = True
-                unique_targets.append(t)
+        # Deduplicate targets and chemicals
+        unique_targets_map = {t['canonical_name']: t for t in all_targets}
+        unique_chemicals_map = {c['canonical_name']: c for c in all_chemicals}
+        
+        # Deterministic sorting by canonical name to ensure stable results on refresh
+        unique_targets = sorted(list(unique_targets_map.values()), key=lambda x: x['canonical_name'])
+        unique_chemicals = sorted(list(unique_chemicals_map.values()), key=lambda x: x['canonical_name'])
 
         return {
-            "targets": unique_targets[:10], # Top 10
-            "chemicals": list({c['canonical_name']: c for c in chemicals}.values())[:10],
-            "rationale": self._generate_computational_rationale(unique_targets, chemicals)
+            "targets": unique_targets[:15], # Increased limit
+            "chemicals": unique_chemicals[:15],
+            "rationale": self._generate_computational_rationale(unique_targets, unique_chemicals)
         }
 
     def _generate_computational_rationale(self, targets, chemicals) -> str:

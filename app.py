@@ -3,14 +3,6 @@ Main FastAPI Application
 Drug Trial Automation System - Standalone Version
 Run with: uvicorn app:app --reload
 """
-# from fastapi import FastAPI, HTTPException
-# from fastapi.middleware.cors import CORSMiddleware
-# from pydantic import BaseModel
-# from typing import List, Optional
-# from backend.db_models import get_session, Patient, Condition, Medication, Observation, Allergy, Immunization, ClinicalTrial, EligibilityCriteria, PatientEligibility
-# from backend.agents.eligibility_matcher import EligibilityMatcher
-# from backend.agents.fda_processor import FDAProcessor
-# from datetime import datetime
 import os
 import sys
 from typing import List, Optional, Dict, Any
@@ -18,12 +10,14 @@ from datetime import datetime
 from pydantic import BaseModel
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from backend.db_models import get_session, Patient, Condition, Medication, Observation, Allergy, Immunization, PatientEligibility, ClinicalTrial, EligibilityCriteria
-import sys
-
-from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from backend.routers import fda_router, trials, audit_router, privacy_router, ltaa_router, insilico_router
+from backend.db_models import (
+    get_session, Patient, Condition, Medication, Observation,
+    Allergy, Immunization, PatientEligibility, ClinicalTrial, EligibilityCriteria
+)
+from backend.routers import (
+    fda_router, trials, audit_router, privacy_router,
+    ltaa_router, insilico_router, chat_router
+)
 from backend.utils.auditor import Auditor
 
 app = FastAPI(
@@ -36,9 +30,9 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "http://localhost:3000", 
-        "http://localhost", 
-        "http://127.0.0.1:3000", 
+        "http://localhost:3000",
+        "http://localhost",
+        "http://127.0.0.1:3000",
         "https://ai.veersalabs.com"
     ],
     allow_credentials=True,
@@ -46,13 +40,80 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Track model readiness for health checks
+_models_ready = False
+
+
+@app.on_event("startup")
+async def startup_event():
+    """Pre-load ALL heavy models on startup to avoid first-request delay."""
+    import threading
+
+    def pre_warm():
+        global _models_ready
+        print("🚀 [STARTUP] Pre-warming ALL models and agents...")
+        try:
+            from backend.nlp_utils import get_nlp, get_llm
+
+            # 1. Load all NLP model variants
+            print("  ⏳ Loading en_core_sci_lg (basic)...")
+            get_nlp("en_core_sci_lg", load_linker=False)
+            print("  ✅ en_core_sci_lg loaded")
+
+            print("  ⏳ Loading en_core_web_sm...")
+            get_nlp("en_core_web_sm", load_linker=False)
+            print("  ✅ en_core_web_sm loaded")
+
+            # 2. Warm up LLM connection (first call is slow)
+            print("  ⏳ Warming up Ollama LLM...")
+            llm = get_llm()
+            try:
+                llm.invoke("Hello")
+            except Exception as e:
+                print(f"  ⚠️ LLM warm-up call failed (Ollama may still be starting): {e}")
+            print("  ✅ LLM connection established")
+
+            # 3. Pre-initialize key agents (loads models into their singletons)
+            print("  ⏳ Pre-initializing FDAProcessor...")
+            from backend.routers.fda_router import _get_fda_processor
+            _get_fda_processor()
+            print("  ✅ FDAProcessor ready")
+
+            print("  ⏳ Pre-initializing ProtocolRuleAgent...")
+            from backend.routers.trials import get_nlp_agent
+            get_nlp_agent()
+            print("  ✅ ProtocolRuleAgent ready")
+
+            _models_ready = True
+            print("✅ [STARTUP] ALL models pre-warmed and ready!")
+
+        except Exception as e:
+            print(f"⚠️ [STARTUP] Pre-warm failed: {e}")
+            _models_ready = True  # Allow traffic even if some models failed
+
+    thread = threading.Thread(target=pre_warm)
+    thread.start()
+
+    # Initialize Orchestrator and Subscribe to Events
+    try:
+        from backend.agents.orchestrator import TrialOrchestrator
+        from backend.events import event_bus
+        orchestrator = TrialOrchestrator()
+        event_bus.subscribe("TRIAL_CREATED", orchestrator.handle_new_trial)
+        print("✅ [STARTUP] TrialOrchestrator subscribed to TRIAL_CREATED")
+    except Exception as e:
+        print(f"⚠️ [STARTUP] Failed to initialize Orchestrator: {e}")
+
+
 # Include routers
 app.include_router(fda_router.router, prefix="/api/fda", tags=["FDA Forms"])
 app.include_router(audit_router.router)
 app.include_router(privacy_router.router)
-app.include_router(trials.router) # trials.py already has prefix /api/trials
+app.include_router(trials.router)
 app.include_router(ltaa_router.router)
 app.include_router(insilico_router.router)
+app.include_router(chat_router.router)
+
 
 # Pydantic Models
 class PatientResponse(BaseModel):
@@ -75,6 +136,7 @@ class TrialCreate(BaseModel):
     indication: str
     drug_name: str
 
+
 # Routes
 @app.get("/")
 async def root():
@@ -96,28 +158,41 @@ async def root():
 
 @app.get("/health")
 async def health_check():
-    """Health check"""
+    """Health check with model readiness status"""
     return {
-        "status": "healthy"
+        "status": "healthy",
+        "models_ready": _models_ready
+    }
+
+@app.get("/health/models")
+async def model_readiness():
+    """Detailed model readiness check"""
+    from backend.nlp_utils import _shared_nlp, _shared_llm
+    return {
+        "models_ready": _models_ready,
+        "nlp_models_loaded": list(_shared_nlp.keys()),
+        "llm_connected": _shared_llm is not None
     }
 
 @app.get("/api/patients")
 async def get_patients(limit: int = 100):
-    """Get all patients"""
+    """Get all patients (de-identified -- no PII returned)"""
     session = get_session()
     patients = session.query(Patient).limit(limit).all()
-    
+
     result = [
         {
             "id": p.id,
             "birthdate": str(p.birthdate),
             "gender": p.gender,
-            "city": p.city,
-            "state": p.state
+            "age_group": p.age_group,
+            "city": "REDACTED" if p.is_deidentified else p.city,
+            "state": p.state,
+            "is_deidentified": p.is_deidentified or False,
         }
         for p in patients
     ]
-    
+
     session.close()
     return {"patients": result, "count": len(result)}
 
@@ -125,74 +200,53 @@ async def get_patients(limit: int = 100):
 async def get_patient_details(patient_id: str):
     """Get detailed patient information"""
     session = get_session()
-    
+
     patient = session.query(Patient).filter_by(id=patient_id).first()
     if not patient:
         session.close()
         raise HTTPException(status_code=404, detail="Patient not found")
-    
+
     conditions = session.query(Condition).filter_by(patient_id=patient_id).all()
     medications = session.query(Medication).filter_by(patient_id=patient_id).all()
     observations = session.query(Observation).filter_by(patient_id=patient_id).all()
     allergies = session.query(Allergy).filter_by(patient_id=patient_id).all()
     immunizations = session.query(Immunization).filter_by(patient_id=patient_id).all()
-    
+
     result = {
         "patient": {
             "id": patient.id,
             "birthdate": str(patient.birthdate),
             "gender": patient.gender,
             "race": patient.race,
-            "city": patient.city,
-            "state": patient.state
+            "age_group": patient.age_group,
+            "city": "REDACTED" if patient.is_deidentified else patient.city,
+            "state": patient.state,
+            "is_deidentified": patient.is_deidentified or False,
         },
         "conditions": [
-            {
-                "code": c.code,
-                "description": c.description,
-                "start_date": str(c.start_date)
-            }
+            {"code": c.code, "description": c.description, "start_date": str(c.start_date)}
             for c in conditions
         ],
         "medications": [
-            {
-                "code": m.code,
-                "description": m.description,
-                "start_date": str(m.start_date)
-            }
+            {"code": m.code, "description": m.description, "start_date": str(m.start_date)}
             for m in medications
         ],
         "observations": [
-            {
-                "code": o.code,
-                "description": o.description,
-                "value": o.value,
-                "units": o.units,
-                "date": str(o.observation_date)
-            }
+            {"code": o.code, "description": o.description, "value": o.value,
+             "units": o.units, "date": str(o.observation_date)}
             for o in observations
         ],
         "allergies": [
-            {
-                "code": a.code,
-                "description": a.description,
-                "type": a.allergy_type,
-                "category": a.category,
-                "reaction": a.reaction1,
-                "severity": a.severity1
-            }
+            {"code": a.code, "description": a.description, "type": a.allergy_type,
+             "category": a.category, "reaction": a.reaction1, "severity": a.severity1}
             for a in allergies
         ],
         "immunizations": [
-            {
-                "code": i.code,
-                "description": i.description,
-                "date": str(i.immunization_date)
-            }
+            {"code": i.code, "description": i.description, "date": str(i.immunization_date)}
             for i in immunizations
         ]
     }
-    
+
     session.close()
     return result
 
@@ -200,8 +254,8 @@ async def get_patient_details(patient_id: str):
 async def get_trials():
     """Get all clinical trials"""
     session = get_session()
-    trials = session.query(ClinicalTrial).all()
-    
+    trials_list = session.query(ClinicalTrial).all()
+
     result = [
         {
             "id": t.id,
@@ -210,11 +264,12 @@ async def get_trials():
             "phase": t.phase,
             "indication": t.indication,
             "drug_name": t.drug_name,
-            "status": t.status
+            "status": t.status,
+            "analysis_status": t.analysis_status or "pending"
         }
-        for t in trials
+        for t in trials_list
     ]
-    
+
     session.close()
     return {"trials": result, "count": len(result)}
 
@@ -222,13 +277,12 @@ async def get_trials():
 async def create_trial(trial: TrialCreate):
     """Create a new clinical trial"""
     session = get_session()
-    
-    # Check if trial_id already exists
+
     existing = session.query(ClinicalTrial).filter_by(trial_id=trial.trial_id).first()
     if existing:
         session.close()
         raise HTTPException(status_code=400, detail="Trial ID already exists")
-    
+
     new_trial = ClinicalTrial(
         trial_id=trial.trial_id,
         protocol_title=trial.protocol_title,
@@ -237,11 +291,10 @@ async def create_trial(trial: TrialCreate):
         drug_name=trial.drug_name,
         status="active"
     )
-    
+
     session.add(new_trial)
     session.commit()
-    
-    # Audit log
+
     auditor = Auditor(session)
     auditor.log(
         action="Trial Created",
@@ -255,13 +308,13 @@ async def create_trial(trial: TrialCreate):
             "drug_name": trial.drug_name
         }
     )
-    
+
     result = {
         "id": new_trial.id,
         "trial_id": new_trial.trial_id,
         "message": "Trial created successfully"
     }
-    
+
     session.close()
     return result
 
@@ -269,38 +322,30 @@ async def create_trial(trial: TrialCreate):
 async def batch_check_eligibility(request: BatchEligibilityRequest):
     """Check eligibility for multiple patients (Optimized)"""
     from backend.agents.eligibility_matcher import EligibilityMatcher
-    
+
     session = get_session()
     try:
         matcher = EligibilityMatcher(db_session=session)
-        # 1. Run batch evaluation
         results = matcher.evaluate_batch(request.patient_ids, request.trial_id)
-        
-        # 2. Save results to Database (Bulk Upsert Logic)
-        # Fetch existing records to decide INSERT vs UPDATE
+
         existing_records = session.query(PatientEligibility).filter(
             PatientEligibility.trial_id == request.trial_id,
             PatientEligibility.patient_id.in_(request.patient_ids)
         ).all()
-        
+
         existing_map = {r.patient_id: r for r in existing_records}
-        
-        to_add = []
-        
+
         for pid, res in results.items():
             is_eligible = res['eligible']
             confidence = res['confidence']
             status = 'eligible' if is_eligible else 'not_eligible'
-            
+
             if pid in existing_map:
-                # Update existing
                 rec = existing_map[pid]
                 rec.eligibility_status = status
                 rec.confidence_score = confidence
                 rec.evaluation_date = datetime.utcnow()
-                # rec.reasons = res['reasons'] # structured_data column if exists
             else:
-                # Create new
                 new_rec = PatientEligibility(
                     patient_id=pid,
                     trial_id=request.trial_id,
@@ -308,11 +353,10 @@ async def batch_check_eligibility(request: BatchEligibilityRequest):
                     confidence_score=confidence,
                     evaluation_date=datetime.utcnow()
                 )
-                session.add(new_rec) # Add individually or collect list
-        
+                session.add(new_rec)
+
         session.commit()
-        
-        # Audit log
+
         auditor = Auditor(session)
         auditor.log(
             action="Batch Eligibility Check",
@@ -325,9 +369,9 @@ async def batch_check_eligibility(request: BatchEligibilityRequest):
                 "eligible_count": sum(1 for r in results.values() if r['eligible'])
             }
         )
-        
+
         return {"results": results}
-        
+
     except Exception as e:
         session.rollback()
         print(f"Batch check error: {e}")
@@ -339,17 +383,14 @@ async def batch_check_eligibility(request: BatchEligibilityRequest):
 async def check_eligibility(request: EligibilityRequest):
     """Check patient eligibility for a trial"""
     from backend.agents.eligibility_matcher import EligibilityMatcher
-    
-    # Use a single session for both matcher and saving result
+
     session = get_session()
     try:
         matcher = EligibilityMatcher(db_session=session)
-        
         result = matcher.evaluate_eligibility(request.patient_id, request.trial_id)
-        
-        # Save result to database (Upsert logic)
+
         existing_record = session.query(PatientEligibility).filter_by(
-            patient_id=request.patient_id, 
+            patient_id=request.patient_id,
             trial_id=request.trial_id
         ).first()
 
@@ -365,10 +406,9 @@ async def check_eligibility(request: EligibilityRequest):
                 confidence_score=result['confidence']
             )
             session.add(eligibility_record)
-        
+
         session.commit()
-        
-        # Audit log
+
         auditor = Auditor(session)
         auditor.log(
             action="Eligibility Check",
@@ -382,7 +422,7 @@ async def check_eligibility(request: EligibilityRequest):
                 "confidence": result['confidence']
             }
         )
-        
+
         return {
             "patient_id": request.patient_id,
             "trial_id": request.trial_id,
@@ -400,20 +440,19 @@ async def check_eligibility(request: EligibilityRequest):
 async def extract_fda_forms(pdf_filename: str = "2.pdf"):
     """Extract FDA form data from drug documentation PDF"""
     pdf_path = f"data/drug/{pdf_filename}"
-    
+
     if not os.path.exists(pdf_path):
         raise HTTPException(status_code=404, detail=f"PDF file not found: {pdf_path}")
-    
-    # Calculate file hash for audit trail
+
     file_hash = Auditor.calculate_file_hash(pdf_path)
-    
-    from backend.agents.fda_processor import FDAProcessor
-    extractor = FDAProcessor()
+
+    from backend.routers.fda_router import _get_fda_processor
+    extractor = _get_fda_processor()
     result = extractor.process_pdf(pdf_path)
-    
+
     session = get_session()
     auditor = Auditor(session)
-    
+
     if 'error' in result:
         auditor.log(
             action="FDA Form Extraction",
@@ -426,8 +465,7 @@ async def extract_fda_forms(pdf_filename: str = "2.pdf"):
         )
         session.close()
         raise HTTPException(status_code=500, detail=result['error'])
-    
-    # Audit log success
+
     auditor.log(
         action="FDA Form Extraction",
         agent="SafetyReportingAgent v2.1",
@@ -441,11 +479,10 @@ async def extract_fda_forms(pdf_filename: str = "2.pdf"):
         document_hash=file_hash
     )
     session.close()
-    
-    # Validate
+
     validation_1571 = result['validation']['form_1571']
     validation_1572 = result['validation']['form_1572']
-    
+
     return {
         "fda_1571": result['fda_1571'],
         "fda_1572": result['fda_1572'],
@@ -459,7 +496,7 @@ async def extract_fda_forms(pdf_filename: str = "2.pdf"):
 async def import_data():
     """Import patient data from CSV files"""
     from import_data import import_all_data
-    
+
     try:
         import_all_data()
         return {"message": "Data import completed successfully"}
@@ -470,14 +507,14 @@ async def import_data():
 async def get_stats():
     """Get system statistics"""
     session = get_session()
-    
+
     stats = {
         "total_patients": session.query(Patient).count(),
         "total_conditions": session.query(Condition).count(),
         "total_trials": session.query(ClinicalTrial).count(),
         "total_eligibility_checks": session.query(PatientEligibility).count()
     }
-    
+
     session.close()
     return stats
 

@@ -1,19 +1,29 @@
-FROM python:3.10-slim
+FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04
 
 WORKDIR /app
 
-# Install system dependencies
+# Install Python 3.10 and system dependencies
 RUN apt-get update && apt-get install -y \
+    software-properties-common \
+    && add-apt-repository ppa:deadsnakes/ppa \
+    && apt-get update && apt-get install -y \
+    python3.10 \
+    python3.10-venv \
+    python3.10-dev \
+    python3-pip \
     gcc \
     g++ \
     curl \
     zstd \
-    python3-dev \
     build-essential \
     tesseract-ocr \
     libtesseract-dev \
     poppler-utils \
     && rm -rf /var/lib/apt/lists/*
+
+# Make python3.10 the default python3
+RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.10 1 \
+    && update-alternatives --install /usr/bin/python python /usr/bin/python3.10 1
 
 # Install Ollama
 RUN curl -fsSL https://ollama.com/install.sh | sh
@@ -21,6 +31,11 @@ RUN curl -fsSL https://ollama.com/install.sh | sh
 # Copy requirements first for better caching
 COPY backend/requirements.txt ./requirements.txt
 RUN pip install --upgrade pip
+
+# Install PyTorch with CUDA support FIRST (before requirements.txt)
+# RUN pip install --no-cache-dir torch==2.5.1 --index-url https://download.pytorch.org/whl/cu124
+
+# Install remaining requirements (torch already installed with CUDA, pip will skip it)
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Download and bake in spaCy models + ScispaCy linker data

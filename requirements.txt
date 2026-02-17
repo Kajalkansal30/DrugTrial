@@ -46,7 +46,7 @@ scispacy==0.5.4
 # ============================
 # Transformers / Embeddings
 # ============================
-torch==2.2.0
+torch>=2.2.0
 transformers==4.37.2
 sentence-transformers==2.3.1
 
@@ -82,3 +82,8 @@ faker==22.6.0
 usaddress==0.5.10
 passlib[bcrypt]==1.7.4
 python-jose[cryptography]==3.3.0
+biopython==1.81
+neo4j==5.14.1
+pubchempy==1.0.4
+rdkit==2023.9.5
+

@@ -15,21 +15,30 @@ class OCRProcessor:
             
     def extract_text_from_pdf(self, pdf_path: str) -> str:
         """
-        Convert PDF to images and run Tesseract OCR on each page.
+        Convert PDF to images and run Tesseract OCR on each page in parallel.
         """
-        logger.info(f"📸 Starting OCR for: {pdf_path}")
+        import concurrent.futures
+        logger.info(f"📸 Starting Parallel OCR for: {pdf_path}")
         try:
             # Convert PDF to list of PIL Image objects
-            # Using 300 DPI for good OCR accuracy
             pages = convert_from_path(pdf_path, 300)
             
-            full_text = []
-            for i, page in enumerate(pages):
+            def process_single_page(args):
+                i, page = args
                 logger.info(f"📄 Processing page {i+1}/{len(pages)}...")
                 text = pytesseract.image_to_string(page)
-                full_text.append(f"--- PAGE {i+1} ---\n{text}")
+                return i, f"--- PAGE {i+1} ---\n{text}"
+
+            full_text_parts = [None] * len(pages)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, len(pages))) as executor:
+                # Use list to block and get results
+                results = list(executor.map(process_single_page, enumerate(pages)))
                 
-            return "\n\n".join(full_text)
+                # Sort results by index to maintain page order
+                for i, text in results:
+                    full_text_parts[i] = text
+                
+            return "\n\n".join(full_text_parts)
         except Exception as e:
             logger.error(f"OCR Failed for {pdf_path}: {e}")
             return f"OCR Error: {str(e)}"

@@ -1,4 +1,5 @@
 import logging
+import threading
 import os
 import json
 import re
@@ -18,6 +19,7 @@ from backend.utils.domain_config import Domain, DocumentType, infer_domain_from_
 from backend.utils.document_classifier import classify_document_type
 from backend.nlp_utils import get_llm
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +42,7 @@ class LTAAAgent:
         self.domain = domain  # Can be set explicitly
         self.bio_validator = None # Initialized per analysis
         self.excluded_entities = []  # Track rejected entities
+        self._lock = threading.Lock()
 
         # Pharma-Grade TUI Filtering (UMLS Semantic Types)
         self.ALLOWED_TUIS = {
@@ -93,6 +96,42 @@ class LTAAAgent:
             "PATHWAY": "Pathway"
         }
 
+    # Static synonym map for common disease terms (replaces slow LLM expansion)
+    DISEASE_SYNONYMS = {
+        "chagas disease": ["trypanosoma cruzi infection", "american trypanosomiasis"],
+        "chronic indeterminate chagas disease": ["chagas disease", "trypanosoma cruzi infection"],
+        "heart failure": ["cardiac failure", "congestive heart failure"],
+        "myocardial infarction": ["heart attack", "acute coronary syndrome"],
+        "diabetes": ["diabetes mellitus", "type 2 diabetes"],
+        "type 2 diabetes": ["diabetes mellitus type 2", "T2DM"],
+        "type 1 diabetes": ["diabetes mellitus type 1", "T1DM", "juvenile diabetes"],
+        "hypertension": ["high blood pressure", "arterial hypertension"],
+        "breast cancer": ["breast carcinoma", "breast neoplasm"],
+        "lung cancer": ["pulmonary neoplasm", "non-small cell lung cancer"],
+        "colorectal cancer": ["colon cancer", "rectal cancer"],
+        "alzheimer's disease": ["alzheimer disease", "AD dementia"],
+        "parkinson's disease": ["parkinson disease", "parkinsonian disorder"],
+        "rheumatoid arthritis": ["RA", "inflammatory arthritis"],
+        "asthma": ["bronchial asthma", "reactive airway disease"],
+        "copd": ["chronic obstructive pulmonary disease", "emphysema"],
+        "depression": ["major depressive disorder", "MDD"],
+        "anxiety": ["generalized anxiety disorder", "GAD"],
+        "fever": ["pyrexia", "febrile illness"],
+        "pain": ["nociceptive pain", "analgesic management"],
+    }
+
+    def _expand_queries(self, disease_query: str) -> list:
+        """Expand disease query using static synonym map (instant, no LLM)."""
+        key = disease_query.lower().strip()
+        # Direct match
+        if key in self.DISEASE_SYNONYMS:
+            return [disease_query] + self.DISEASE_SYNONYMS[key]
+        # Partial match: check if any synonym key is contained in the query
+        for disease_key, synonyms in self.DISEASE_SYNONYMS.items():
+            if disease_key in key or key in disease_key:
+                return [disease_query] + synonyms
+        return [disease_query]
+
     def _cache_key(self, disease: str, trial_id: str, max_papers: int) -> str:
         """
         Generate cache key from disease query only.
@@ -140,68 +179,90 @@ class LTAAAgent:
         cache_key = self._cache_key(disease_query, target_trial_id, max_papers)
         cached_result = self._load_cache(cache_key)
         if cached_result:
-            print("✅ Returning cached analysis result")
+            print(f"✅ Returning cached analysis for: {disease_query}")
             return cached_result
+
+        # 0. Early Exit for Generic Indications
+        generic_indications = ['general', 'unknown', 'none', 'n/a', 'indication', 'diagnosis', 'study']
+        if disease_query.lower().strip() in generic_indications:
+            logger.warning(f"⚠️ Indication '{disease_query}' is too generic. Skipping PubMed research.")
+            return {
+                "disease": disease_query,
+                "domain": "general",
+                "status": "ready",
+                "summary": "Indication is too generic for specific literature research. Please refine the trial diagnosis.",
+                "ranked_targets": [],
+                "report": {"summary": "Generic indication - no specific targets identified."},
+                "excluded_entities": {"total_excluded": 0, "by_reason": {}, "top_excluded": []},
+                "stats": {
+                    "domain": "general",
+                    "pubmed_count": 0,
+                    "pdf_count": 0,
+                    "targets_found": 0,
+                    "entities_rejected": 0,
+                    "total_score": 0
+                }
+            }
+
+        # 0.5 Expand Indication for better PubMed coverage (static synonyms, no LLM)
+        queries_to_try = self._expand_queries(disease_query)
+        logger.info(f"🧬 Expanded queries: {queries_to_try}")
         
-        # 1. Fetch relevant PubMed abstracts with fallback strategy
-        queries_to_try = [disease_query]
-        
-        # Generate relaxed query if original is complex
-        qualifiers = ['chronic', 'acute', 'indeterminate', 'severe', 'mild', 'stage', 'grade', 
-                     'type', 'relapsed', 'refractory', 'recurrent', 'metastatic', 'advanced', 'early']
-        
-        simplified_query = ' '.join([w for w in disease_query.split() if w.lower() not in qualifiers])
-        if simplified_query.lower() != disease_query.lower() and len(simplified_query) > 3:
-            queries_to_try.append(simplified_query)
-        
-        print(f"DEBUG: Queries to try: {queries_to_try}")
-        
-        # CLEAR previous graph data for this disease to prevent duplicates
+        # 1. Clear graph + Fetch PubMed + Process PDF in PARALLEL
         try:
             self.graph.clear_disease(disease_query)
         except Exception as e:
             logger.error(f"Failed to clear graph for {disease_query}: {e}")
-        
-        pubmed_records = []
-        for q in queries_to_try:
-            print(f"📚 Searching PubMed for: '{q}'")
-            records = fetch_pubmed_abstracts([q], max_results=max_papers)
-            if records:
-                pubmed_records = records
-                print(f"✅ Found {len(records)} abstracts for '{q}'")
-                break
-            print(f"⚠️ No results for '{q}', trying fallback...")
-            
-        if not pubmed_records:
-            print(f"❌ PubMed search failed for all queries: {queries_to_try}")
-        
-        # 2. Process ONLY the target trial PDF - SORTED for determinism
-        pdf_records = []
-        pdf_path = Path(self.pdf_folder)
-        if pdf_path.exists() and target_trial_id:
-            search_pattern = f"*{target_trial_id}*.pdf"
-            matching_files = sorted(pdf_path.glob(search_pattern))  # SORTED!
-            logger.info(f"🔍 Found {len(matching_files)} matching PDFs for {target_trial_id}")
-            
-            for pdf_file in matching_files[:1]:
-                try:
-                    pdf_data = process_pdf_document(str(pdf_file))
-                    
-                    # Classify document type
-                    sample_text = pdf_data['chunks'][0]['text'] if pdf_data.get('chunks') else ""
-                    doc_type = classify_document_type(sample_text, pdf_file.name)
-                    pdf_data['document_type'] = doc_type
-                    
-                    pdf_records.append(pdf_data)
-                    logger.info(f"📄 Processed PDF: {pdf_file.name} classified as {doc_type.value}")
-                except Exception as e:
-                    logger.error(f"Failed to process PDF {pdf_file.name}: {e}")
 
-        # 3. Process Content & Build Graph with Citations (Weighted)
+        def _fetch_pubmed():
+            for q in queries_to_try:
+                print(f"📚 Searching PubMed for: '{q}'")
+                records = fetch_pubmed_abstracts([q], max_results=max_papers)
+                if records:
+                    print(f"✅ Found {len(records)} abstracts for '{q}'")
+                    return records
+                print(f"⚠️ No results for '{q}', trying fallback...")
+            print(f"❌ PubMed search failed for all queries: {queries_to_try}")
+            return []
+
+        def _process_pdfs():
+            results = []
+            pdf_path = Path(self.pdf_folder)
+            if pdf_path.exists() and target_trial_id:
+                search_pattern = f"*{target_trial_id}*.pdf"
+                matching_files = sorted(pdf_path.glob(search_pattern))
+                logger.info(f"🔍 Found {len(matching_files)} matching PDFs for {target_trial_id}")
+                for pdf_file in matching_files[:1]:
+                    try:
+                        pdf_data = process_pdf_document(str(pdf_file))
+                        sample_text = pdf_data['chunks'][0]['text'] if pdf_data.get('chunks') else ""
+                        doc_type = classify_document_type(sample_text, pdf_file.name)
+                        pdf_data['document_type'] = doc_type
+                        results.append(pdf_data)
+                        logger.info(f"📄 Processed PDF: {pdf_file.name} classified as {doc_type.value}")
+                    except Exception as e:
+                        logger.error(f"Failed to process PDF {pdf_file.name}: {e}")
+            return results
+
+        with ThreadPoolExecutor(max_workers=2) as io_executor:
+            pubmed_future = io_executor.submit(_fetch_pubmed)
+            pdf_future = io_executor.submit(_process_pdfs)
+            pubmed_records = pubmed_future.result()
+            pdf_records = pdf_future.result()
+
+        # 3. Process Content & Build Graph with Citations (Parallelized)
+        processing_tasks = []
         
         # PubMed - sorted by URL for determinism
         for pub in sorted(pubmed_records, key=lambda x: x.get('url', '')):
-            self._process_text(disease_query, pub['text'], pub['url'], 0, current_domain, DocumentType.RESEARCH_PAPER)
+            processing_tasks.append({
+                "disease_query": disease_query,
+                "text": pub['text'],
+                "source": pub['url'],
+                "page": 0,
+                "domain": current_domain,
+                "doc_type": DocumentType.RESEARCH_PAPER
+            })
             
         # Local PDFs
         for pdf in pdf_records:
@@ -209,7 +270,30 @@ class LTAAAgent:
             doc_type = pdf.get('document_type', DocumentType.UNKNOWN)
             # Ensure chunks are in page order
             for chunk in sorted(pdf['chunks'], key=lambda x: x.get('page', 0)):
-                self._process_text(disease_query, chunk['text'], source_label, chunk['page'], current_domain, doc_type)
+                processing_tasks.append({
+                    "disease_query": disease_query,
+                    "text": chunk['text'],
+                    "source": source_label,
+                    "page": chunk['page'],
+                    "domain": current_domain,
+                    "doc_type": doc_type
+                })
+
+        # Cap chunks to avoid OOM -- prioritize PubMed (research papers) then first N PDF chunks
+        MAX_CHUNKS = 40
+        if len(processing_tasks) > MAX_CHUNKS:
+            logger.info(f"⚠️ Capping {len(processing_tasks)} chunks to {MAX_CHUNKS} to prevent OOM")
+            processing_tasks = processing_tasks[:MAX_CHUNKS]
+
+        print(f"🚀 Processing {len(processing_tasks)} chunks in parallel...")
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            list(executor.map(lambda t: self._process_text(**t), processing_tasks))
+
+        # Flush any remaining batched graph writes
+        try:
+            self.graph.flush_evidence()
+        except Exception as e:
+            logger.warning(f"Graph flush failed: {e}")
 
         # 4. Get Ranked Targets with improved scoring
         ranked_results = self._get_ranked_targets_with_threshold(disease_query)
@@ -217,9 +301,9 @@ class LTAAAgent:
         logger.info(f"📊 Ranked {len(ranked_results)} high-quality targets")
         logger.info(f"🚫 Excluded {len(self.excluded_entities)} entities")
         
-        # 5. LLM-Based Scientific Justification (Top 3 Targets)
+        # 5. Fast Template-Based Scientific Justification (Top 3 Targets)
         top_targets = ranked_results[:3]
-        justification = self._generate_scientific_report(disease_query, top_targets)
+        justification = self._generate_scientific_report_fast(disease_query, top_targets)
         
         # 6. Summarize excluded entities
         excluded_summary = self._summarize_excluded_entities()
@@ -245,6 +329,10 @@ class LTAAAgent:
         # Cache the result
         self._save_cache(cache_key, result)
         
+        # Flush persistent bio validation cache to disk
+        from backend.utils.bio_validator import flush_validation_cache
+        flush_validation_cache()
+        
         return result
 
     def _process_text(self, disease_query: str, text: str, source: str, page: int, 
@@ -268,40 +356,44 @@ class LTAAAgent:
             # 1. Comprehensive generic check (base + domain specific)
             is_generic, reason = is_generic_term(raw)
             if is_generic:
-                self.excluded_entities.append({
-                    "entity": raw,
-                    "reason": reason,
-                    "source": source,
-                    "page": page
-                })
+                with self._lock:
+                    self.excluded_entities.append({
+                        "entity": raw,
+                        "reason": reason,
+                        "source": source,
+                        "page": page
+                    })
                 continue
                 
             if ent_norm in domain_generics:
-                self.excluded_entities.append({
-                    "entity": raw,
-                    "reason": f"domain_generic_{domain.value}",
-                    "source": source,
-                    "page": page
-                })
+                with self._lock:
+                    self.excluded_entities.append({
+                        "entity": raw,
+                        "reason": f"domain_generic_{domain.value}",
+                        "source": source,
+                        "page": page
+                    })
                 continue
 
             # 2. Skip very short or numeric tokens
             if len(ent_norm) < 3:
-                self.excluded_entities.append({
-                    "entity": raw,
-                    "reason": "too_short",
-                    "source": source,
-                    "page": page
-                })
+                with self._lock:
+                    self.excluded_entities.append({
+                        "entity": raw,
+                        "reason": "too_short",
+                        "source": source,
+                        "page": page
+                    })
                 continue
 
             if ent_norm.isdigit():
-                self.excluded_entities.append({
-                    "entity": raw,
-                    "reason": "numeric_only",
-                    "source": source,
-                    "page": page
-                })
+                with self._lock:
+                    self.excluded_entities.append({
+                        "entity": raw,
+                        "reason": "numeric_only",
+                        "source": source,
+                        "page": page
+                    })
                 continue
 
             # 3. Find matching TUI category
@@ -313,22 +405,24 @@ class LTAAAgent:
                     break
             
             if not matched_category:
-                self.excluded_entities.append({
-                    "entity": raw,
-                    "reason": "no_tui_match",
-                    "source": source,
-                    "page": page
-                })
+                with self._lock:
+                    self.excluded_entities.append({
+                        "entity": raw,
+                        "reason": "no_tui_match",
+                        "source": source,
+                        "page": page
+                    })
                 continue
 
             # 4. Blacklist check (safety net for old blacklist)
             if ent_norm in self.BLACKLIST:
-                self.excluded_entities.append({
-                    "entity": raw,
-                    "reason": "in_blacklist",
-                    "source": source,
-                    "page": page
-                })
+                with self._lock:
+                    self.excluded_entities.append({
+                        "entity": raw,
+                        "reason": "in_blacklist",
+                        "source": source,
+                        "page": page
+                    })
                 continue
 
             # 5. Deduplicate within chunk
@@ -341,13 +435,14 @@ class LTAAAgent:
             is_valid, validation_info = self.bio_validator.validate_entity(raw, friendly_label)
             
             if not is_valid:
-                self.excluded_entities.append({
-                    "entity": raw,
-                    "reason": f"not_in_{domain.value}_db",
-                    "type": friendly_label,
-                    "source": source,
-                    "page": page
-                })
+                with self._lock:
+                    self.excluded_entities.append({
+                        "entity": raw,
+                        "reason": f"not_in_{domain.value}_db",
+                        "type": friendly_label,
+                        "source": source,
+                        "page": page
+                    })
                 logger.debug(f"❌ Rejected {raw} - not found in {domain.value} databases")
                 continue
 
@@ -456,10 +551,68 @@ class LTAAAgent:
         return ranked
 
 
+    def _generate_scientific_report_fast(self, disease: str, top_targets: List[Dict]) -> Dict[str, Any]:
+        """
+        Template-based scientific report (instant, no LLM call).
+        Produces the same JSON shape as the LLM version for UI compatibility.
+        """
+        if not top_targets:
+            return {"summary": "No specific targets identified with high confidence."}
+
+        justifications = []
+        for t in top_targets:
+            evidence = t.get("evidence", t.get("citations", []))
+            unique_sources = list(set(
+                c.get("source", "") for c in evidence if c.get("source")
+            ))[:3]
+            snippets = [
+                c.get("snippet", c.get("context", ""))[:200]
+                for c in evidence if c.get("snippet") or c.get("context")
+            ][:3]
+
+            target_name = t.get("name", "Unknown")
+            target_type = t.get("type", "target")
+            score = round(t.get("score", 0), 2)
+            mentions = t.get("mentions", len(evidence))
+
+            justifications.append({
+                "target": target_name,
+                "biological_context": (
+                    f"{target_name} is a {target_type.lower()} identified through "
+                    f"literature mining of {mentions} evidence sources related to {disease}."
+                ),
+                "disease_mechanism": (
+                    f"{target_name} was found in {len(unique_sources)} distinct publications "
+                    f"discussing {disease}, with an aggregate evidence score of {score}."
+                ),
+                "therapeutic_rationale": (
+                    f"Targeting {target_name} may be relevant for {disease} based on "
+                    f"converging evidence from PubMed literature and protocol analysis."
+                ),
+                "confidence_score": min(1.0, score / 10.0),
+                "evidence_snippets": snippets if snippets else [
+                    f"Referenced in {mentions} evidence sources for {disease}."
+                ]
+            })
+
+        total_targets = len(top_targets)
+        top_name = top_targets[0].get("name", "Unknown") if top_targets else "N/A"
+        summary = (
+            f"Literature analysis identified {total_targets} key molecular targets for {disease}. "
+            f"The highest-scoring target is {top_name} with an evidence score of "
+            f"{round(top_targets[0].get('score', 0), 2) if top_targets else 0}."
+        )
+
+        return {
+            "summary": summary,
+            "justifications": justifications
+        }
+
     def _generate_scientific_report(self, disease: str, top_targets: List[Dict]) -> Dict[str, Any]:
         """
         Use LLM to generate a structured scientific justification (PhD Level).
         Deterministic LLM settings and robust JSON parsing.
+        Kept for optional deep-analysis mode; not used in default flow.
         """
         if not top_targets:
             return {"summary": "No specific targets identified with high confidence."}
@@ -470,30 +623,32 @@ class LTAAAgent:
 
         targets_json = json.dumps(top_targets, indent=2)
         prompt = f"""
-You are a biomedical research assistant. Produce JSON only.
+You are a Senior Biomedical Scientist (PhD). Produce JSON only.
 
 INPUT:
 - disease: "{disease}"
 - targets: {targets_json}
 
 TASK:
-For each target, provide:
+For each target, provide a high-rigor scientific assessment:
  - "target": canonical name
- - "mechanism": short mechanism if known or "Unknown"
- - "relevance": 1-2 sentence reason
- - "confidence": 0.0-1.0 numeric
- - "evidence": list of short provenance items
+ - "biological_context": 2-3 sentences explaining the target's role in the human body.
+ - "disease_mechanism": Exactly how this target relates to "{disease}" pathogenesis.
+ - "therapeutic_rationale": Why targeting this would be beneficial.
+ - "confidence_score": 0.0-1.0 (based on evidence strength).
+ - "evidence_snippets": List up to 3 direct quotes or snippets from the provided evidence.
 
 Return JSON shaped exactly like:
 {{
-  "summary": "one-line summary",
+  "summary": "High-level molecular overview",
   "justifications": [
     {{
-      "target": "ABC1",
-      "mechanism": "plays X via ...",
-      "relevance": "why relevant",
-      "confidence": 0.85,
-      "evidence": ["PubMed:xxxx", "Protocol:page 4"]
+      "target": "...",
+      "biological_context": "...",
+      "disease_mechanism": "...",
+      "therapeutic_rationale": "...",
+      "confidence_score": 0.9,
+      "evidence_snippets": ["Quote 1", "Quote 2"]
     }}
   ]
 }}
