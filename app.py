@@ -178,100 +178,98 @@ async def model_readiness():
 async def get_patients(limit: int = 100):
     """Get all patients (de-identified -- no PII returned)"""
     session = get_session()
-    patients = session.query(Patient).limit(limit).all()
-
-    result = [
-        {
-            "id": p.id,
-            "birthdate": str(p.birthdate),
-            "gender": p.gender,
-            "age_group": p.age_group,
-            "city": "REDACTED" if p.is_deidentified else p.city,
-            "state": p.state,
-            "is_deidentified": p.is_deidentified or False,
-        }
-        for p in patients
-    ]
-
-    session.close()
-    return {"patients": result, "count": len(result)}
+    try:
+        patients = session.query(Patient).limit(limit).all()
+        result = [
+            {
+                "id": p.id,
+                "birthdate": str(p.birthdate),
+                "gender": p.gender,
+                "age_group": p.age_group,
+                "city": "REDACTED" if p.is_deidentified else p.city,
+                "state": p.state,
+                "is_deidentified": p.is_deidentified or False,
+            }
+            for p in patients
+        ]
+        return {"patients": result, "count": len(result)}
+    finally:
+        session.close()
 
 @app.get("/api/patients/{patient_id}")
 async def get_patient_details(patient_id: str):
     """Get detailed patient information"""
     session = get_session()
+    try:
+        patient = session.query(Patient).filter_by(id=patient_id).first()
+        if not patient:
+            raise HTTPException(status_code=404, detail="Patient not found")
 
-    patient = session.query(Patient).filter_by(id=patient_id).first()
-    if not patient:
+        conditions = session.query(Condition).filter_by(patient_id=patient_id).all()
+        medications = session.query(Medication).filter_by(patient_id=patient_id).all()
+        observations = session.query(Observation).filter_by(patient_id=patient_id).all()
+        allergies = session.query(Allergy).filter_by(patient_id=patient_id).all()
+        immunizations = session.query(Immunization).filter_by(patient_id=patient_id).all()
+
+        return {
+            "patient": {
+                "id": patient.id,
+                "birthdate": str(patient.birthdate),
+                "gender": patient.gender,
+                "race": patient.race,
+                "age_group": patient.age_group,
+                "city": "REDACTED" if patient.is_deidentified else patient.city,
+                "state": patient.state,
+                "is_deidentified": patient.is_deidentified or False,
+            },
+            "conditions": [
+                {"code": c.code, "description": c.description, "start_date": str(c.start_date)}
+                for c in conditions
+            ],
+            "medications": [
+                {"code": m.code, "description": m.description, "start_date": str(m.start_date)}
+                for m in medications
+            ],
+            "observations": [
+                {"code": o.code, "description": o.description, "value": o.value,
+                 "units": o.units, "date": str(o.observation_date)}
+                for o in observations
+            ],
+            "allergies": [
+                {"code": a.code, "description": a.description, "type": a.allergy_type,
+                 "category": a.category, "reaction": a.reaction1, "severity": a.severity1}
+                for a in allergies
+            ],
+            "immunizations": [
+                {"code": i.code, "description": i.description, "date": str(i.immunization_date)}
+                for i in immunizations
+            ]
+        }
+    finally:
         session.close()
-        raise HTTPException(status_code=404, detail="Patient not found")
-
-    conditions = session.query(Condition).filter_by(patient_id=patient_id).all()
-    medications = session.query(Medication).filter_by(patient_id=patient_id).all()
-    observations = session.query(Observation).filter_by(patient_id=patient_id).all()
-    allergies = session.query(Allergy).filter_by(patient_id=patient_id).all()
-    immunizations = session.query(Immunization).filter_by(patient_id=patient_id).all()
-
-    result = {
-        "patient": {
-            "id": patient.id,
-            "birthdate": str(patient.birthdate),
-            "gender": patient.gender,
-            "race": patient.race,
-            "age_group": patient.age_group,
-            "city": "REDACTED" if patient.is_deidentified else patient.city,
-            "state": patient.state,
-            "is_deidentified": patient.is_deidentified or False,
-        },
-        "conditions": [
-            {"code": c.code, "description": c.description, "start_date": str(c.start_date)}
-            for c in conditions
-        ],
-        "medications": [
-            {"code": m.code, "description": m.description, "start_date": str(m.start_date)}
-            for m in medications
-        ],
-        "observations": [
-            {"code": o.code, "description": o.description, "value": o.value,
-             "units": o.units, "date": str(o.observation_date)}
-            for o in observations
-        ],
-        "allergies": [
-            {"code": a.code, "description": a.description, "type": a.allergy_type,
-             "category": a.category, "reaction": a.reaction1, "severity": a.severity1}
-            for a in allergies
-        ],
-        "immunizations": [
-            {"code": i.code, "description": i.description, "date": str(i.immunization_date)}
-            for i in immunizations
-        ]
-    }
-
-    session.close()
-    return result
 
 @app.get("/api/trials")
 async def get_trials():
     """Get all clinical trials"""
     session = get_session()
-    trials_list = session.query(ClinicalTrial).all()
-
-    result = [
-        {
-            "id": t.id,
-            "trial_id": t.trial_id,
-            "protocol_title": t.protocol_title,
-            "phase": t.phase,
-            "indication": t.indication,
-            "drug_name": t.drug_name,
-            "status": t.status,
-            "analysis_status": t.analysis_status or "pending"
-        }
-        for t in trials_list
-    ]
-
-    session.close()
-    return {"trials": result, "count": len(result)}
+    try:
+        trials_list = session.query(ClinicalTrial).all()
+        result = [
+            {
+                "id": t.id,
+                "trial_id": t.trial_id,
+                "protocol_title": t.protocol_title,
+                "phase": t.phase,
+                "indication": t.indication,
+                "drug_name": t.drug_name,
+                "status": t.status,
+                "analysis_status": t.analysis_status or "pending"
+            }
+            for t in trials_list
+        ]
+        return {"trials": result, "count": len(result)}
+    finally:
+        session.close()
 
 @app.post("/api/trials")
 async def create_trial(trial: TrialCreate):
