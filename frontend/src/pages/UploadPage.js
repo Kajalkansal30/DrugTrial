@@ -31,15 +31,25 @@ const UploadPage = ({ onUploadSuccess }) => {
 
         const formData = new FormData();
         formData.append('file', file);
-        const API_URL = process.env.REACT_APP_API_URL || '';
+        const API_URL = import.meta.env.VITE_API_URL || '';
 
+        let timeoutId = null;
         try {
+            // 10-minute inactivity timeout (resets on each chunk)
+            const controller = new AbortController();
+            timeoutId = setTimeout(() => {
+                console.error('Upload timeout: no data received for 10 minutes');
+                controller.abort();
+            }, 600000);
+
             const response = await fetch(`${API_URL}/api/fda/upload`, {
                 method: 'POST',
                 body: formData,
+                signal: controller.signal
             });
 
             if (!response.ok) {
+                clearTimeout(timeoutId);
                 const errorText = await response.text();
                 throw new Error(`Upload failed: ${response.status} ${response.statusText} - ${errorText}`);
             }
@@ -51,7 +61,17 @@ const UploadPage = ({ onUploadSuccess }) => {
 
             while (true) {
                 const { done, value } = await reader.read();
-                if (done) break;
+                if (done) {
+                    clearTimeout(timeoutId);
+                    break;
+                }
+
+                // Reset timeout on each chunk received (connection is active)
+                clearTimeout(timeoutId);
+                timeoutId = setTimeout(() => {
+                    console.error('Stream timeout: no data for 10 minutes');
+                    controller.abort();
+                }, 600000);
 
                 buffer += decoder.decode(value, { stream: true });
                 const lines = buffer.split('\n');
@@ -89,6 +109,9 @@ const UploadPage = ({ onUploadSuccess }) => {
                 throw new Error("Stream ended unexpectedly. Checking if upload succeeded...");
             }
         } catch (err) {
+            // Clean up timeout
+            if (timeoutId) clearTimeout(timeoutId);
+
             // Stream may have broken due to proxy timeout, but the backend might have
             // finished processing. Poll the documents list to check.
             setLogs(prev => [...prev, "🔄 Verifying upload status..."]);
