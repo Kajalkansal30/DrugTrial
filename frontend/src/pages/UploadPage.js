@@ -121,10 +121,11 @@ const UploadPage = ({ onUploadSuccess }) => {
                 try {
                     const checkResp = await fetch(`${API_URL}/api/fda/documents`);
                     if (checkResp.ok) {
-                        const docs = await checkResp.json();
-                        const recent = docs.find(d =>
+                        const docsResp = await checkResp.json();
+                        const docsList = docsResp.documents || docsResp;
+                        const recent = (Array.isArray(docsList) ? docsList : []).find(d =>
                             d.filename === file.name &&
-                            new Date(d.processed_at) > new Date(Date.now() - 180000)
+                            new Date(d.processed_at || d.upload_date) > new Date(Date.now() - 300000)
                         );
                         if (recent) {
                             setLogs(prev => [...prev, "✅ Upload complete! Redirecting..."]);
