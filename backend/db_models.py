@@ -331,8 +331,9 @@ def get_database():
                 conn.execute(sa_text("ALTER TABLE clinical_trials ADD COLUMN IF NOT EXISTS matching_config JSON"))
                 conn.execute(sa_text("ALTER TABLE patient_eligibility ADD COLUMN IF NOT EXISTS organization_id INTEGER"))
                 conn.commit()
-            except Exception:
-                pass
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).warning(f"Auto-migration warning: {e}")
         
         _SessionLocal = sessionmaker(bind=_engine)
        

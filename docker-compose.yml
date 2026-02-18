@@ -70,12 +70,12 @@ services:
       context: ./frontend
       dockerfile: Dockerfile
       args:
-        - REACT_APP_API_URL=
+        - REACT_APP_API_URL=https://ai.veersalabs.com/drugtrial-be
     container_name: drugtrial_frontend
     ports:
       - "3000:3000"
     environment:
-      - REACT_APP_API_URL=
+      - REACT_APP_API_URL=https://ai.veersalabs.com/drugtrial-be
       - CHOKIDAR_USEPOLLING=true
     depends_on:
       - backend

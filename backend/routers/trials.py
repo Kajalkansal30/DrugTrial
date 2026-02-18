@@ -104,9 +104,9 @@ def run_ltaa_analysis(indication: str, trial_id: str):
         logger.info(f"✅ [BACKGROUND] LTAA completed for '{indication}': {target_count} targets found")
         
         # Persist LTAA results to DB for durability across restarts
+        db = None
         try:
             db = get_session()
-            # trial_id can be a trial_id string ("TRIAL_DNDI_BFCD") or a doc.id string ("103")
             trial = db.query(ClinicalTrial).filter_by(trial_id=trial_id).first()
             if not trial and str(trial_id).isdigit():
                 trial = db.query(ClinicalTrial).filter_by(document_id=int(trial_id)).first()
@@ -120,7 +120,6 @@ def run_ltaa_analysis(indication: str, trial_id: str):
                 flag_modified(trial, 'analysis_results')
                 db.commit()
                 logger.info(f"💾 [BACKGROUND] LTAA results persisted to DB for trial: {trial.trial_id}")
-            # Audit log
             try:
                 from backend.utils.auditor import Auditor
                 auditor = Auditor(db)
@@ -134,9 +133,11 @@ def run_ltaa_analysis(indication: str, trial_id: str):
                 )
             except Exception:
                 pass
-            db.close()
         except Exception as db_err:
             logger.error(f"⚠️ [BACKGROUND] Failed to persist LTAA to DB: {db_err}")
+        finally:
+            if db:
+                db.close()
     except Exception as e:
         logger.error(f"❌ [BACKGROUND] LTAA failed for '{indication}': {e}")
         import traceback
@@ -225,9 +226,9 @@ def run_insilico_analysis(trial_id: str, text: str):
             pickle.dump(insilico_data, f)
         
         # Persist InSilico results to DB for durability across restarts
+        db = None
         try:
             db = get_session()
-            # trial_id can be a trial_id string ("TRIAL_DNDI_BFCD") or a doc.id int/string
             trial = db.query(ClinicalTrial).filter_by(trial_id=str(trial_id)).first()
             if not trial and str(trial_id).isdigit():
                 trial = db.query(ClinicalTrial).filter_by(document_id=int(trial_id)).first()
@@ -239,8 +240,6 @@ def run_insilico_analysis(trial_id: str, text: str):
                 flag_modified(trial, 'analysis_results')
                 db.commit()
                 logger.info(f"💾 [BACKGROUND] InSilico results persisted to DB for trial: {trial.trial_id}")
-            db.close()
-            # Audit log
             try:
                 from backend.utils.auditor import Auditor
                 auditor = Auditor(db)
@@ -255,9 +254,11 @@ def run_insilico_analysis(trial_id: str, text: str):
                 )
             except Exception:
                 pass
-            db.close()
         except Exception as db_err:
             logger.error(f"⚠️ [BACKGROUND] Failed to persist InSilico to DB: {db_err}")
+        finally:
+            if db:
+                db.close()
             
         logger.info(f"✅ [BACKGROUND] In Silico completed for '{trial_id}'")
     except Exception as e:
@@ -304,7 +305,7 @@ def extract_pdf_text(file_path: str) -> str:
 
 
 @router.post("/upload")
-async def upload_protocol(file: UploadFile = File(...), background_tasks: BackgroundTasks = None):
+async def upload_protocol(file: UploadFile = File(...), background_tasks: BackgroundTasks = BackgroundTasks()):
     """Upload a clinical trial protocol PDF and extract criteria + FDA forms"""
     if not file.filename.endswith('.pdf'):
         raise HTTPException(status_code=400, detail="Only PDF files are supported")

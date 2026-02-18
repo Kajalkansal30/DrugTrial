@@ -49,10 +49,10 @@ async def get_verification_samples(limit: int = 5):
                     "is_deidentified": p.is_deidentified
                 },
                 "vault": {
-                    "first_name": vault.encrypted_pii.get('first_name') if vault else "MISSING",
-                    "last_name": vault.encrypted_pii.get('last_name') if vault else "MISSING",
-                    "masked_ssn": vault.encrypted_pii.get('ssn') if vault else "MISSING",
-                    "original_id": vault.encrypted_pii.get('original_id') if vault else "MISSING"
+                    "first_name": (vault.encrypted_pii or {}).get('first_name', 'MISSING') if vault else "MISSING",
+                    "last_name": (vault.encrypted_pii or {}).get('last_name', 'MISSING') if vault else "MISSING",
+                    "masked_ssn": (vault.encrypted_pii or {}).get('ssn', 'MISSING') if vault else "MISSING",
+                    "original_id": (vault.encrypted_pii or {}).get('original_id', 'MISSING') if vault else "MISSING"
                 }
             })
         return results
