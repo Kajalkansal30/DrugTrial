@@ -549,6 +549,255 @@ async def approve_trial_forms(trial_id: str, fda_1571: Dict = None, fda_1572: Di
         db.close()
 
 
+# In-memory status for criteria extraction (keyed by trial_id string)
+_criteria_status: Dict[str, dict] = {}
+
+
+@router.post("/{trial_id}/extract-criteria")
+async def extract_criteria(trial_id: str, background_tasks: BackgroundTasks):
+    """
+    Step 3: On-demand eligibility criteria extraction.
+    Runs NLP + LLM in background; frontend polls GET /{trial_id}/rules to see results.
+    """
+    db = get_session()
+    try:
+        trial = db.query(ClinicalTrial).filter_by(trial_id=trial_id).first()
+        if not trial:
+            raise HTTPException(status_code=404, detail="Trial not found")
+
+        existing = db.query(EligibilityCriteria).filter_by(trial_id=trial.id).count()
+        if existing > 0:
+            return {"status": "already_extracted", "criteria_count": existing,
+                    "message": "Criteria already extracted"}
+
+        _criteria_status[trial_id] = {"status": "running", "progress": 0}
+        background_tasks.add_task(_bg_extract_criteria, trial_id, trial.id, trial.document_id)
+        return {"status": "started", "message": "Criteria extraction started"}
+    finally:
+        db.close()
+
+
+@router.get("/{trial_id}/criteria-status")
+async def get_criteria_status(trial_id: str):
+    """Poll this to check criteria extraction progress."""
+    status = _criteria_status.get(trial_id)
+    if status:
+        return status
+    db = get_session()
+    try:
+        trial = db.query(ClinicalTrial).filter_by(trial_id=trial_id).first()
+        if not trial:
+            raise HTTPException(status_code=404, detail="Trial not found")
+        count = db.query(EligibilityCriteria).filter_by(trial_id=trial.id).count()
+        if count > 0:
+            return {"status": "done", "criteria_count": count}
+        return {"status": "not_started", "criteria_count": 0}
+    finally:
+        db.close()
+
+
+def _bg_extract_criteria(trial_id: str, trial_db_id: int, document_id: int):
+    """Background: extract eligibility criteria via NLP + LLM."""
+    from backend.agents.protocol_rule_agent import ProtocolRuleAgent
+    from backend.db_models import FDADocument
+    import pdfplumber
+
+    db = get_session()
+    try:
+        _criteria_status[trial_id] = {"status": "running", "progress": 20,
+                                       "message": "Reading protocol text..."}
+
+        doc = db.query(FDADocument).filter_by(id=document_id).first()
+        if not doc:
+            _criteria_status[trial_id] = {"status": "error", "message": "Document not found"}
+            return
+        filename = doc.filename
+    finally:
+        db.close()
+
+    full_text = ""
+    possible_paths = [
+        os.path.join("uploads", "fda_documents", filename),
+        os.path.join("/app/uploads/fda_documents", filename),
+    ]
+    for p in possible_paths:
+        if os.path.exists(p):
+            try:
+                with pdfplumber.open(p) as pdf:
+                    full_text = "\n".join(page.extract_text() or "" for page in pdf.pages)
+            except Exception:
+                pass
+            break
+
+    if not full_text:
+        _criteria_status[trial_id] = {"status": "error",
+                                       "message": "Could not read protocol PDF"}
+        return
+
+    _criteria_status[trial_id] = {"status": "running", "progress": 40,
+                                   "message": "Extracting criteria with NLP + LLM..."}
+
+    try:
+        agent = ProtocolRuleAgent()
+        criteria = agent.extract_rules(full_text)
+    except Exception as e:
+        logger.exception("LLM criteria extraction failed for %s", trial_id)
+        _criteria_status[trial_id] = {"status": "error", "message": f"LLM extraction failed: {e}"}
+        return
+
+    _criteria_status[trial_id] = {"status": "running", "progress": 80,
+                                   "message": "Saving criteria to database..."}
+
+    db2 = get_session()
+    try:
+        criteria_count = 0
+        for c_type in ['inclusion', 'exclusion']:
+            for c_data in criteria.get(c_type, []):
+                text_to_save = c_data.get('source_text') or c_data.get('text', '')
+                if not text_to_save or len(text_to_save.strip()) < 5:
+                    continue
+                db2.add(EligibilityCriteria(
+                    trial_id=trial_db_id, criterion_type=c_type,
+                    text=text_to_save,
+                    category=c_data.get('rule_type', 'unclassified'),
+                    operator=c_data.get('operator'),
+                    value=str(c_data.get('value')) if c_data.get('value') is not None else None,
+                    unit=c_data.get('unit'), negated=c_data.get('negated', False),
+                    structured_data=c_data,
+                ))
+                criteria_count += 1
+        db2.commit()
+
+        trial = db2.query(ClinicalTrial).filter_by(trial_id=trial_id).first()
+        if trial:
+            trial.status = "Criteria Extracted"
+            db2.commit()
+
+        try:
+            from backend.utils.auditor import Auditor
+            Auditor(db2).log(
+                action="Eligibility Criteria Extracted", agent="ProtocolRuleAgent",
+                target_type="trial", target_id=trial_id, status="Success",
+                details={"criteria_count": criteria_count},
+            )
+        except Exception:
+            pass
+
+        _criteria_status[trial_id] = {"status": "done", "criteria_count": criteria_count,
+                                       "progress": 100, "message": f"{criteria_count} criteria extracted"}
+
+    except Exception as e:
+        logger.exception("Criteria save failed for %s", trial_id)
+        db2.rollback()
+        _criteria_status[trial_id] = {"status": "error", "message": str(e)}
+    finally:
+        db2.close()
+
+
+# In-memory status for LTAA + InSilico analysis
+_analysis_status: Dict[str, dict] = {}
+
+
+@router.post("/{trial_id}/run-analysis")
+async def run_analysis(trial_id: str, background_tasks: BackgroundTasks):
+    """
+    Step 4: On-demand LTAA + InSilico analysis.
+    Triggered from the screening page.
+    """
+    db = get_session()
+    try:
+        trial = db.query(ClinicalTrial).filter_by(trial_id=trial_id).first()
+        if not trial:
+            raise HTTPException(status_code=404, detail="Trial not found")
+
+        if trial.analysis_status == "completed":
+            return {"status": "already_completed", "message": "Analysis already done"}
+
+        trial.analysis_status = "running"
+        db.commit()
+
+        _analysis_status[trial_id] = {"status": "running", "progress": 10,
+                                       "message": "Starting LTAA + InSilico analysis..."}
+
+        background_tasks.add_task(_bg_run_analysis, trial_id, trial.id)
+        return {"status": "started", "message": "LTAA + InSilico analysis started"}
+    finally:
+        db.close()
+
+
+@router.get("/{trial_id}/analysis-status")
+async def get_analysis_status(trial_id: str):
+    """Poll this to check LTAA + InSilico progress."""
+    status = _analysis_status.get(trial_id)
+    if status:
+        return status
+    db = get_session()
+    try:
+        trial = db.query(ClinicalTrial).filter_by(trial_id=trial_id).first()
+        if not trial:
+            raise HTTPException(status_code=404, detail="Trial not found")
+        return {"status": trial.analysis_status or "pending"}
+    finally:
+        db.close()
+
+
+def _bg_run_analysis(trial_id: str, trial_db_id: int):
+    """Background: publish TRIAL_CREATED event to trigger orchestrator."""
+    db = get_session()
+    try:
+        trial = db.query(ClinicalTrial).filter_by(id=trial_db_id).first()
+        if not trial:
+            _analysis_status[trial_id] = {"status": "error", "message": "Trial not found"}
+            return
+
+        _analysis_status[trial_id] = {"status": "running", "progress": 20,
+                                       "message": "Preparing analysis..."}
+
+        trial_data = {
+            "trial_id": trial.trial_id,
+            "title": trial.protocol_title,
+            "disease": trial.indication,
+            "drug_name": trial.drug_name,
+            "phase": trial.phase,
+            "document_id": trial.document_id,
+        }
+        filename = None
+        if trial.document_id:
+            from backend.db_models import FDADocument
+            doc = db.query(FDADocument).filter_by(id=trial.document_id).first()
+            if doc:
+                filename = doc.filename
+    finally:
+        db.close()
+
+    full_text = ""
+    if filename:
+        import pdfplumber
+        for p in [os.path.join("uploads", "fda_documents", filename),
+                  os.path.join("/app/uploads/fda_documents", filename)]:
+            if os.path.exists(p):
+                try:
+                    with pdfplumber.open(p) as pdf:
+                        full_text = "\n".join(pg.extract_text() or "" for pg in pdf.pages)
+                except Exception:
+                    pass
+                break
+
+    _analysis_status[trial_id] = {"status": "running", "progress": 30,
+                                   "message": "Running LTAA + InSilico..."}
+
+    try:
+        from backend.events import event_bus
+        trial_data["full_text"] = full_text
+        event_bus.publish("TRIAL_CREATED", trial_data)
+
+        _analysis_status[trial_id] = {"status": "running", "progress": 50,
+                                       "message": "LTAA + InSilico running in background..."}
+    except Exception as e:
+        logger.exception("Analysis trigger failed for %s", trial_id)
+        _analysis_status[trial_id] = {"status": "error", "message": str(e)}
+
+
 @router.get("/{trial_id}/rules")
 async def get_trial_rules(trial_id: str):
     """Get eligibility rules for a specific trial"""

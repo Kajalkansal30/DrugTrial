@@ -53,311 +53,175 @@ class TestRequest(BaseModel):
 async def upload_and_process_pdf(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
-    session: Session = Depends(get_session)
 ):
     """
-    Upload PDF and extract FDA forms with real-time logging
-    Returns: StreamingResponse (NDJSON)
+    Upload PDF and kick off background processing.
+    Returns immediately with document_id; frontend polls /status/{id}.
     """
-    auditor = Auditor(session)
-    
-    # Validate file type
     if not file.filename.endswith('.pdf'):
         raise HTTPException(status_code=400, detail="Only PDF files are allowed")
-    
-    # Create uploads directory if it doesn't exist
+
     upload_dir = "uploads/fda_documents"
     os.makedirs(upload_dir, exist_ok=True)
-    
-    # Save uploaded file
+
     file_path = os.path.join(upload_dir, file.filename)
     with open(file_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
-        
-    from fastapi.responses import StreamingResponse
-    import json
-    
-    # Use singleton processor to avoid re-loading NLP models
-    processor = _get_fda_processor()
-    
-    async def process_stream():
+
+    import hashlib
+    with open(file_path, "rb") as fh:
+        file_hash = hashlib.sha256(fh.read()).hexdigest()
+
+    session = get_session()
+    try:
+        doc = FDADocument(
+            filename=file.filename,
+            file_hash=file_hash,
+            status='processing',
+            processed_at=None,
+        )
+        session.add(doc)
+        session.commit()
+        session.refresh(doc)
+        doc_id = doc.id
+    finally:
+        session.close()
+
+    _processing_status[doc_id] = {
+        "step": "queued",
+        "logs": ["Uploaded — queued for processing"],
+        "progress": 5,
+    }
+
+    background_tasks.add_task(_run_fda_extraction, doc_id, file.filename, file_path)
+
+    return {
+        "success": True,
+        "document_id": doc_id,
+        "filename": file.filename,
+        "status": "processing",
+        "message": "Upload received. Processing started in background.",
+    }
+
+
+# In-memory processing status (keyed by document_id)
+_processing_status: Dict[int, Dict[str, Any]] = {}
+
+
+@router.get("/status/{document_id}")
+async def get_processing_status(document_id: int):
+    """Poll this endpoint to track background processing progress."""
+    status = _processing_status.get(document_id)
+    if status:
+        return status
+
+    session = get_session()
+    try:
+        doc = session.query(FDADocument).filter_by(id=document_id).first()
+        if not doc:
+            raise HTTPException(status_code=404, detail="Document not found")
+        if doc.status == 'extracted':
+            return {
+                "step": "done",
+                "progress": 100,
+                "logs": ["FDA forms extracted — ready for review"],
+                "document_id": document_id,
+            }
+        if doc.status == 'failed':
+            return {"step": "error", "progress": 0, "logs": ["Processing failed"]}
+        return {"step": "processing", "progress": 10, "logs": ["Processing..."]}
+    finally:
+        session.close()
+
+
+def _update_status(doc_id: int, step: str, log_msg: str, progress: int, **extra):
+    entry = _processing_status.setdefault(doc_id, {"step": step, "logs": [], "progress": 0})
+    entry["step"] = step
+    entry["progress"] = progress
+    entry["logs"].append(log_msg)
+    entry.update(extra)
+
+
+def _run_fda_extraction(doc_id: int, filename: str, file_path: str):
+    """Background: extract FDA forms from PDF and save to DB. Nothing else."""
+    import logging
+    logger = logging.getLogger("fda_bg")
+
+    session = get_session()
+    try:
+        auditor = Auditor(session)
+
+        _update_status(doc_id, "extracting", "📄 Extracting FDA forms from PDF...", 10)
+        processor = _get_fda_processor()
+
+        def log_cb(msg):
+            _update_status(doc_id, "extracting", msg, min(80, _processing_status[doc_id]["progress"] + 8))
+
+        result = processor.process_pdf(file_path, log_callback=log_cb)
+
+        auditor.log(
+            action="FDA Form Extraction", agent="SafetyReportingAgent v2.1",
+            target_type="document", target_id=filename, status="Success",
+            details={"ind_number": result.get('fda_1571', {}).get('ind_number'),
+                      "protocol_title": result.get('fda_1571', {}).get('protocol_title')},
+            document_hash=result.get('document_hash'),
+        )
+
+        _update_status(doc_id, "saving", "💾 Saving extracted forms...", 85)
+
+        doc = session.query(FDADocument).filter_by(id=doc_id).first()
+        doc.file_hash = result['document_hash']
+        doc.status = 'extracted'
+        doc.processed_at = datetime.utcnow()
+
+        form_1571_data = result['fda_1571']
+        form_1571 = FDAForm1571(
+            document_id=doc_id,
+            **{k: v for k, v in form_1571_data.items() if k != 'cross_reference_inds'},
+            cross_reference_inds=form_1571_data.get('cross_reference_inds', []),
+            extraction_metadata={'validation': result['validation']['form_1571'],
+                                  'processed_at': result['metadata']['processed_at']},
+        )
+        session.add(form_1571)
+
+        form_1572_data = result['fda_1572']
+        form_1572 = FDAForm1572(
+            document_id=doc_id,
+            **{k: v for k, v in form_1572_data.items()
+               if k not in ['study_sites', 'sub_investigators', 'clinical_laboratories']},
+            study_sites=form_1572_data.get('study_sites', []),
+            sub_investigators=form_1572_data.get('sub_investigators', []),
+            clinical_laboratories=form_1572_data.get('clinical_laboratories', []),
+            extraction_metadata={'validation': result['validation']['form_1572'],
+                                  'processed_at': result['metadata']['processed_at']},
+        )
+        session.add(form_1572)
+        session.commit()
+
+        _update_status(doc_id, "done", "✅ FDA forms extracted — ready for review", 100,
+                        document_id=doc_id)
+
+    except Exception as e:
+        logger.exception("FDA extraction failed for doc %s", doc_id)
+        session.rollback()
         try:
-            yield json.dumps({"type": "log", "message": f"🚀 Starting processing for {file.filename}..."}) + "\n"
-            
-            # Define callback to yield logs
-            # Note: synchronous generator inside async wrapper works for simple cases, 
-            # but for true non-blocking we'd need threadpool. 
-            # For this scale, slight blocking is acceptable as we yield between steps.
-            
-            logs_queue = []
-            def log_callback(msg):
-                logs_queue.append(msg)
-                
-            # Run processing (this will block, but we can't yield from inside the callback easily without threads)
-            # Better approach: We yield "Starting...", run the whole thing, then yield result.
-            # To get real streaming, we need to break down the processor steps here OR use a thread.
-            # Let's use the breaking down approach since we exposed granularity (or can just use the provided callback hooks)
-            
-            # ACTUALLY, since we modified FDAProcessor to take a callback, we can capture them.
-            # But yielding requires control flow. 
-            # Simple solution: Run in thread, put logs in queue, yield from queue.
-            
-            import queue
-            import threading
-            import time as _time
-            
-            q = queue.Queue()
-            result_container = {}
-            error_container = {}
-            
-            def worker():
-                try:
-                    def cb(msg):
-                        q.put({"type": "log", "message": msg})
-                    
-                    res = processor.process_pdf(file_path, log_callback=cb)
-                    result_container['data'] = res
-                except Exception as e:
-                    error_container['error'] = str(e)
-                finally:
-                    q.put(None) # Signal done
-            
-            t = threading.Thread(target=worker)
-            t.start()
-            
-            last_yield_time = _time.time()
-            
-            while True:
-                try:
-                    item = q.get(timeout=0.5)
-                    if item is None:
-                        break
-                    yield json.dumps(item) + "\n"
-                    last_yield_time = _time.time()
-                except queue.Empty:
-                    if not t.is_alive():
-                        break
-                    # Send keepalive ping every 5s to prevent proxy timeout
-                    if _time.time() - last_yield_time > 5:
-                        yield json.dumps({"type": "log", "message": "⏳ Processing..."}) + "\n"
-                        last_yield_time = _time.time()
-                    import asyncio
-                    await asyncio.sleep(0.05)
-            
-            t.join()
-            
-            if 'error' in error_container:
-                yield json.dumps({"type": "error", "message": error_container['error']}) + "\n"
-                return
-
-            result = result_container['data']
-            
-            # Audit log success
-            auditor.log(
-                action="FDA Form Extraction",
-                agent="SafetyReportingAgent v2.1",
-                target_type="document",
-                target_id=file.filename,
-                status="Success",
-                details={
-                    "ind_number": result.get('fda_1571', {}).get('ind_number'),
-                    "protocol_title": result.get('fda_1571', {}).get('protocol_title')
-                },
-                document_hash=result.get('document_hash')
-            )
-
-            # 2. Database Saving (Quick)
-            yield json.dumps({"type": "log", "message": "💾 Saving results to database..."}) + "\n"
-            
-            # Create document record
-            doc = FDADocument(
-                filename=file.filename,
-                file_hash=result['document_hash'],
-                status='extracted',
-                processed_at=datetime.utcnow()
-            )
-            session.add(doc)
-            session.flush()
-            
-            # Create Form 1571 record
-            form_1571_data = result['fda_1571']
-            form_1571 = FDAForm1571(
-                document_id=doc.id,
-                **{k: v for k, v in form_1571_data.items() if k != 'cross_reference_inds'},
-                cross_reference_inds=form_1571_data.get('cross_reference_inds', []),
-                extraction_metadata={
-                    'validation': result['validation']['form_1571'],
-                    'processed_at': result['metadata']['processed_at']
-                }
-            )
-            session.add(form_1571)
-            
-            # Create Form 1572 record
-            form_1572_data = result['fda_1572']
-            form_1572 = FDAForm1572(
-                document_id=doc.id,
-                **{k: v for k, v in form_1572_data.items() 
-                   if k not in ['study_sites', 'sub_investigators', 'clinical_laboratories']},
-                study_sites=form_1572_data.get('study_sites', []),
-                sub_investigators=form_1572_data.get('sub_investigators', []),
-                clinical_laboratories=form_1572_data.get('clinical_laboratories', []),
-                extraction_metadata={
-                    'validation': result['validation']['form_1572'],
-                    'processed_at': result['metadata']['processed_at']
-                }
-            )
-            session.add(form_1572)
-            session.commit()
-            
-            # --- Auto-create ClinicalTrial ---
-            yield json.dumps({"type": "log", "message": "🔬 Creating clinical trial record..."}) + "\n"
-
-            full_text = getattr(processor, '_last_full_text', '') or ''
-            if not full_text:
-                import pdfplumber
-                try:
-                    with pdfplumber.open(file_path) as pdf:
-                        full_text = "\n".join(p.extract_text() or "" for p in pdf.pages)
-                except Exception:
-                    full_text = ""
-
-            protocol_title = form_1571_data.get('protocol_title') or file.filename.replace('.pdf', '')
-            phase = form_1571_data.get('study_phase') or "Unknown"
-            drug_name_val = form_1571_data.get('drug_name') or "Unknown"
-            indication_val = form_1571_data.get('indication') or "Unknown"
-
-            import uuid
-            trial_uid = f"TRIAL_{doc.filename[:4]}_{uuid.uuid4().hex[:4]}".replace(" ", "_").upper()
-
-            def model_to_dict_for_trial(model):
-                if not model: return {}
-                data = {}
-                for c in model.__table__.columns:
-                    if c.name == 'document': continue
-                    val = getattr(model, c.name)
-                    if isinstance(val, (datetime, date)):
-                        val = val.isoformat()
-                    data[c.name] = val
-                return data
-
-            new_trial = ClinicalTrial(
-                trial_id=trial_uid,
-                protocol_title=protocol_title,
-                phase=phase,
-                indication=indication_val,
-                drug_name=drug_name_val,
-                status="Criteria Extracted",
-                document_id=doc.id,
-                fda_1571=model_to_dict_for_trial(form_1571),
-                fda_1572=model_to_dict_for_trial(form_1572),
-                analysis_status="pending"
-            )
-            session.add(new_trial)
-            session.commit()
-            session.refresh(new_trial)
-
-            yield json.dumps({"type": "log", "message": f"📋 Trial {trial_uid} created"}) + "\n"
-
-            # Audit: Trial created
-            auditor.log(
-                action="Trial Created from Upload",
-                agent="FDAProcessor",
-                target_type="trial",
-                target_id=new_trial.trial_id,
-                status="Success",
-                details={"document_id": doc.id, "indication": indication_val, "drug": drug_name_val, "phase": phase},
-            )
-
-            # --- Extract Eligibility Criteria ---
-            yield json.dumps({"type": "log", "message": "🤖 Extracting eligibility criteria..."}) + "\n"
-
-            criteria_count = 0
-            nlp_agent = get_nlp_agent()
-            if nlp_agent and full_text:
-                criteria = nlp_agent.extract_rules(full_text)
-                for c_type in ['inclusion', 'exclusion']:
-                    for c_data in criteria.get(c_type, []):
-                        text_to_save = c_data.get('source_text') or c_data.get('text', '')
-                        if not text_to_save or len(text_to_save.strip()) < 5:
-                            continue
-                        session.add(EligibilityCriteria(
-                            trial_id=new_trial.id,
-                            criterion_type=c_type,
-                            text=text_to_save,
-                            category=c_data.get('rule_type', 'unclassified'),
-                            operator=c_data.get('operator'),
-                            value=str(c_data.get('value')) if c_data.get('value') is not None else None,
-                            unit=c_data.get('unit'),
-                            negated=c_data.get('negated', False),
-                            structured_data=c_data
-                        ))
-                        criteria_count += 1
+            doc = session.query(FDADocument).filter_by(id=doc_id).first()
+            if doc:
+                doc.status = 'failed'
                 session.commit()
-
-            # Audit: Criteria extracted
-            auditor.log(
-                action="Eligibility Criteria Extracted",
-                agent="ProtocolRuleAgent",
-                target_type="trial",
-                target_id=new_trial.trial_id,
-                status="Success",
-                details={"criteria_count": criteria_count},
+        except Exception:
+            pass
+        try:
+            Auditor(session).log(
+                action="FDA Form Extraction", agent="SafetyReportingAgent v2.1",
+                target_type="document", target_id=filename, status="Failure",
+                details={"error": str(e)},
             )
-
-            yield json.dumps({"type": "log", "message": f"✅ {criteria_count} criteria extracted"}) + "\n"
-
-            # --- Publish TRIAL_CREATED for Orchestrator (LTAA + InSilico) ---
-            from backend.events import event_bus
-            trial_event = {
-                "trial_id": new_trial.trial_id,
-                "title": protocol_title,
-                "disease": indication_val,
-                "drug_name": drug_name_val,
-                "phase": phase,
-                "full_text": full_text,
-            }
-            background_tasks.add_task(event_bus.publish, "TRIAL_CREATED", trial_event)
-            yield json.dumps({"type": "log", "message": "🚀 LTAA + InSilico analysis queued"}) + "\n"
-
-            # 3. Final Response
-            final_response = {
-                "success": True,
-                "document_id": doc.id,
-                "trial_id": new_trial.trial_id,
-                "trial_db_id": new_trial.id,
-                "filename": file.filename,
-                "status": "extracted",
-                "validation": result['validation'],
-                "metadata": result['metadata']
-            }
-            yield json.dumps({"type": "result", "payload": final_response}) + "\n"
-            
-        except Exception as e:
-            session.rollback()
-            # Audit log failure
-            try:
-                auditor.log(
-                    action="FDA Form Extraction",
-                    agent="SafetyReportingAgent v2.1",
-                    target_type="document",
-                    target_id=file.filename,
-                    status="Failure",
-                    details={"error": str(e)}
-                )
-            except: pass
-            yield json.dumps({"type": "error", "message": str(e)}) + "\n"
-        finally:
-            session.close()
-
-    return StreamingResponse(
-        process_stream(),
-        media_type="application/x-ndjson",
-        headers={
-            "X-Accel-Buffering": "no",        # Disable nginx buffering
-            "Cache-Control": "no-cache",        # Prevent caching of stream
-            "Transfer-Encoding": "chunked",
-        }
-    )
+        except Exception:
+            pass
+        _update_status(doc_id, "error", f"❌ {str(e)}", 0)
+    finally:
+        session.close()
 
 
 @router.get("/documents")
@@ -700,22 +564,20 @@ async def test_criteria(request: TestRequest):
 
 @router.post("/documents/{document_id}/create-trial")
 async def create_trial_from_document(
-    document_id: int, 
+    document_id: int,
     background_tasks: BackgroundTasks,
     session: Session = Depends(get_session)
 ):
     """
-    Convert a processed FDA document into a Clinical Trial record.
-    Triggers eligibility criteria extraction.
+    Create a ClinicalTrial record from a processed FDA document (DB only, fast).
+    Criteria extraction and analysis happen in later steps.
     """
     auditor = Auditor(session)
     try:
-        # 1. Fetch FDA Document
         doc = session.query(FDADocument).filter_by(id=document_id).first()
         if not doc:
             raise HTTPException(status_code=404, detail="Document not found")
-            
-        # IDEMPOTENCY CHECK: Check if a trial already exists for this document
+
         existing_trial = session.query(ClinicalTrial).filter_by(document_id=document_id).first()
         if existing_trial:
             return {
@@ -728,13 +590,12 @@ async def create_trial_from_document(
 
         form_1571 = session.query(FDAForm1571).filter_by(document_id=document_id).first()
         form_1572 = session.query(FDAForm1572).filter_by(document_id=document_id).first()
-        
-        # 2. Extract Data for Trial
+
         protocol_title = "Untitled Protocol"
         phase = "Unknown"
         drug_name = "Unknown"
         indication = "Unknown"
-        
+
         if form_1571:
             protocol_title = form_1571.protocol_title or protocol_title
             phase = form_1571.study_phase or phase
@@ -742,17 +603,17 @@ async def create_trial_from_document(
             indication = form_1571.indication or indication
         elif form_1572:
             protocol_title = form_1572.protocol_title or protocol_title
-             
-        # Generate a trial ID
+
         import uuid
         trial_uid = f"TRIAL_{doc.filename[:4]}_{uuid.uuid4().hex[:4]}".replace(" ", "_").upper()
-        
-        # Helper: Model to Dict with datetime to string conversion
+
         def model_to_dict(model):
-            if not model: return {}
+            if not model:
+                return {}
             data = {}
             for c in model.__table__.columns:
-                if c.name == 'document': continue
+                if c.name == 'document':
+                    continue
                 val = getattr(model, c.name)
                 if isinstance(val, (datetime, date)):
                     val = val.isoformat()
@@ -765,114 +626,60 @@ async def create_trial_from_document(
             phase=phase,
             indication=indication,
             drug_name=drug_name,
-            status="Criteria Review",
+            status="Pending Criteria",
             document_id=document_id,
             fda_1571=model_to_dict(form_1571),
-            fda_1572=model_to_dict(form_1572)
+            fda_1572=model_to_dict(form_1572),
+            analysis_status="pending",
         )
         session.add(new_trial)
         session.commit()
         session.refresh(new_trial)
-        
-        # Audit log trial creation
+
         auditor.log(
             action="Trial Created from FDA Document",
             agent="SafetyReportingAgent v2.1",
             target_type="trial",
             target_id=new_trial.trial_id,
             status="Success",
-            details={
-                "document_id": document_id,
-                "filename": doc.filename
-            }
+            details={"document_id": document_id, "filename": doc.filename},
         )
-        
-        # 3. Trigger Criteria Extraction
-        # Try to reuse cached text from FDAProcessor, fallback to re-read
-        processor = _get_fda_processor()
-        text = getattr(processor, '_last_full_text', '') or ''
-        
-        if not text:
-            import pdfplumber
-            possible_paths = [
-                os.path.join("/app/uploads/fda_documents", doc.filename),
-                os.path.join("uploads", "fda_documents", doc.filename),
-                os.path.join(os.getcwd(), "uploads", "fda_documents", doc.filename)
-            ]
-            for p in possible_paths:
-                if os.path.exists(p):
-                    try:
-                        with pdfplumber.open(p) as pdf:
-                            text = "\n".join(page.extract_text() or "" for page in pdf.pages)
-                    except Exception as e:
-                        print(f"Error re-reading PDF: {e}")
-                    break
-        
-        agent = get_nlp_agent()
-        criteria = {"inclusion": [], "exclusion": []}
-        if agent and text:
-            criteria = agent.extract_rules(text)
-            
-            for c_data in criteria.get('inclusion', []):
-                text_to_save = c_data.get('source_text') or c_data.get('text')
-                if not text_to_save: continue
-                
-                session.add(EligibilityCriteria(
-                    trial_id=new_trial.id,
-                    criterion_type='inclusion',
-                    text=text_to_save,
-                    category=c_data.get('rule_type', 'unclassified'),
-                    operator=c_data.get('operator'),
-                    value=str(c_data.get('value')) if c_data.get('value') is not None else None,
-                    unit=c_data.get('unit'),
-                    negated=c_data.get('negated', False),
-                    structured_data=c_data
-                ))
-                
-            for c_data in criteria.get('exclusion', []):
-                text_to_save = c_data.get('source_text') or c_data.get('text')
-                if not text_to_save: continue
-                
-                session.add(EligibilityCriteria(
-                    trial_id=new_trial.id,
-                    criterion_type='exclusion',
-                    text=text_to_save,
-                    category=c_data.get('rule_type', 'unclassified'),
-                    operator=c_data.get('operator'),
-                    value=str(c_data.get('value')) if c_data.get('value') is not None else None,
-                    unit=c_data.get('unit'),
-                    negated=c_data.get('negated', False),
-                    structured_data=c_data
-                ))
-            
-            session.commit()
-            
-            # 4. Publish TRIAL_CREATED event -- Orchestrator handles LTAA + InSilico
-            try:
-                from backend.events import event_bus
-                trial_event = {
-                    "trial_id": new_trial.trial_id,
-                    "title": new_trial.protocol_title,
-                    "disease": indication,
-                    "phase": phase,
-                    "drug_name": drug_name,
-                    "full_text": text,
-                }
-                background_tasks.add_task(event_bus.publish, "TRIAL_CREATED", trial_event)
-                print(f"📡 Published TRIAL_CREATED for {new_trial.trial_id} via Orchestrator")
-            except Exception as e:
-                print(f"⚠️ Failed to publish TRIAL_CREATED event: {e}")
+
+        background_tasks.add_task(
+            _trigger_analysis_for_trial,
+            new_trial.trial_id, new_trial.id, indication, drug_name, document_id
+        )
 
         return {
             "success": True,
             "trial_id": new_trial.trial_id,
             "db_id": new_trial.id,
-            "message": "Trial created and criteria extracted"
+            "message": "Trial created — analysis starting in background",
         }
-        
+
+    except HTTPException:
+        raise
     except Exception as e:
         session.rollback()
-        print(f"Error creating trial: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to create trial: {str(e)}")
     finally:
         session.close()
+
+
+def _trigger_analysis_for_trial(trial_id: str, trial_db_id: int, indication: str, drug_name: str, document_id: int):
+    """Fire TRIAL_CREATED event so the orchestrator runs LTAA + InSilico in background."""
+    import logging
+    logger = logging.getLogger("fda_auto_analysis")
+    try:
+        from backend.events import event_bus
+        trial_event = {
+            "trial_id": trial_id,
+            "db_id": trial_db_id,
+            "indication": indication,
+            "drug_name": drug_name,
+            "document_id": document_id,
+        }
+        logger.info(f"Auto-triggering LTAA + InSilico for {trial_id}")
+        event_bus.publish("TRIAL_CREATED", trial_event)
+    except Exception as e:
+        logger.error(f"Failed to auto-trigger analysis for {trial_id}: {e}")
