@@ -1,87 +1,121 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
     Box, Typography, Button, Paper, Grid, Stack, Tabs, Tab,
     Drawer, List, ListItem, ListItemText, ListItemIcon,
-    Divider, IconButton, Fade, CircularProgress, Alert, Chip
+    Divider, IconButton, Fade, CircularProgress, Alert, Chip,
+    LinearProgress
 } from '@mui/material';
 import {
-    Psychology,
-    PlayArrow,
-    InfoOutlined,
-    Close,
-    AutoStories,
-    BarChart,
-    CheckCircle,
-    Cancel,
-    Science,
-    LocalHospital
+    Psychology, PlayArrow, Close, AutoStories, BarChart,
+    Science, LocalHospital
 } from '@mui/icons-material';
 import axios from 'axios';
 import { useParams, useNavigate } from 'react-router-dom';
 import RuleCard from '../components/RuleCard';
+
+const API_URL = process.env.REACT_APP_API_URL || '';
 
 const CriteriaPage = () => {
     const { trialId } = useParams();
     const [rules, setRules] = useState([]);
     const [ruleTypeSummary, setRuleTypeSummary] = useState({});
     const [loading, setLoading] = useState(true);
+    const [extracting, setExtracting] = useState(false);
+    const [extractProgress, setExtractProgress] = useState(0);
+    const [extractMessage, setExtractMessage] = useState('');
     const [error, setError] = useState(null);
     const [glossaryOpen, setGlossaryOpen] = useState(false);
     const [glossaryTerms, setGlossaryTerms] = useState([]);
     const [activeTab, setActiveTab] = useState(0);
     const navigate = useNavigate();
 
-    useEffect(() => {
-        fetchRules();
-        fetchGlossary();
-    }, [trialId]);
-
-    const fetchRules = async () => {
+    const fetchRules = useCallback(async () => {
         try {
-            setLoading(true);
-            const API_URL = process.env.REACT_APP_API_URL || '';
             const response = await axios.get(`${API_URL}/api/trials/${trialId}/rules`);
-            console.log("DEBUG: Rules fetched from API:", response.data.rules?.length || 0, "rules");
-            setRules(response.data.rules || []);
+            const fetchedRules = response.data.rules || [];
+            setRules(fetchedRules);
             setRuleTypeSummary(response.data._summary || {});
-            setLoading(false);
+            return fetchedRules.length;
         } catch (err) {
             console.error("Failed to fetch rules", err);
-            setError("Could not load extraction results. Please ensure the backend is running.");
-            setLoading(false);
+            return 0;
         }
-    };
+    }, [trialId]);
 
-    const fetchGlossary = async () => {
+    const fetchGlossary = useCallback(async () => {
         try {
-            const API_URL = process.env.REACT_APP_API_URL || '';
             const response = await axios.get(`${API_URL}/api/trials/${trialId}/glossary`);
             setGlossaryTerms(response.data.glossary || []);
         } catch (err) {
-            console.error("Failed to fetch glossary", err);
-            // Use fallback static glossary
-            setGlossaryTerms([
-                { term: 'HbA1c', semantic_type: 'Lab Test', used_in: 'inclusion' },
-                { term: 'eGFR', semantic_type: 'Lab Test', used_in: 'inclusion' },
-                { term: 'ALT', semantic_type: 'Lab Test', used_in: 'exclusion' },
-                { term: 'ULN', semantic_type: 'Reference Value', used_in: 'exclusion' }
-            ]);
+            setGlossaryTerms([]);
         }
-    };
+    }, [trialId]);
 
-    // Filter rules by category
+    const triggerExtraction = useCallback(async () => {
+        setExtracting(true);
+        setExtractProgress(5);
+        setExtractMessage('Starting criteria extraction...');
+
+        try {
+            const res = await axios.post(`${API_URL}/api/trials/${trialId}/extract-criteria`);
+            if (res.data.status === 'already_extracted') {
+                setExtracting(false);
+                await fetchRules();
+                fetchGlossary();
+                return;
+            }
+
+            const poll = setInterval(async () => {
+                try {
+                    const statusRes = await axios.get(`${API_URL}/api/trials/${trialId}/criteria-status`);
+                    const data = statusRes.data;
+                    setExtractProgress(data.progress || 0);
+                    setExtractMessage(data.message || 'Processing...');
+
+                    if (data.status === 'done') {
+                        clearInterval(poll);
+                        setExtracting(false);
+                        await fetchRules();
+                        fetchGlossary();
+                    } else if (data.status === 'error') {
+                        clearInterval(poll);
+                        setExtracting(false);
+                        setError(data.message || 'Criteria extraction failed');
+                    }
+                } catch (_) { /* keep polling */ }
+            }, 3000);
+        } catch (err) {
+            setExtracting(false);
+            setError('Failed to start criteria extraction');
+        }
+    }, [trialId, fetchRules, fetchGlossary]);
+
+    useEffect(() => {
+        let cancelled = false;
+        (async () => {
+            setLoading(true);
+            const count = await fetchRules();
+            if (!cancelled) {
+                setLoading(false);
+                if (count === 0) {
+                    triggerExtraction();
+                } else {
+                    fetchGlossary();
+                }
+            }
+        })();
+        return () => { cancelled = true; };
+    }, [trialId, fetchRules, triggerExtraction, fetchGlossary]);
+
     const inclusionRules = rules.filter(r => r.type === 'inclusion');
     const exclusionRules = rules.filter(r => r.type === 'exclusion');
     const labValueRules = rules.filter(r =>
-        r.structured_data?.rule_type === 'LAB_THRESHOLD' ||
-        r.category === 'LAB_THRESHOLD'
+        r.structured_data?.rule_type === 'LAB_THRESHOLD' || r.category === 'LAB_THRESHOLD'
     );
     const conditionRules = rules.filter(r =>
-        r.structured_data?.rule_type?.includes('CONDITION') ||
-        r.category?.includes('CONDITION')
+        r.structured_data?.rule_type?.includes('CONDITION') || r.category?.includes('CONDITION')
     );
 
-    // Tab definitions
     const tabs = [
         { label: 'All Criteria', count: rules.length },
         { label: 'Inclusion', count: inclusionRules.length },
@@ -104,15 +138,37 @@ const CriteriaPage = () => {
         return (
             <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', minHeight: '60vh' }}>
                 <CircularProgress size={60} thickness={4} sx={{ mb: 2 }} />
-                <Typography variant="h6" color="textSecondary">Loading extracted criteria...</Typography>
-                <Typography variant="body2" color="textSecondary" sx={{ mt: 1 }}>Fetching pre-processed eligibility rules from database</Typography>
+                <Typography variant="h6" color="textSecondary">Loading criteria...</Typography>
+            </Box>
+        );
+    }
+
+    if (extracting) {
+        return (
+            <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', minHeight: '60vh' }}>
+                <Psychology sx={{ fontSize: 64, color: '#1976d2', mb: 2 }} />
+                <Typography variant="h5" sx={{ fontWeight: 700, mb: 1 }}>
+                    Extracting Eligibility Criteria
+                </Typography>
+                <Typography variant="body1" color="textSecondary" sx={{ mb: 3 }}>
+                    {extractMessage}
+                </Typography>
+                <Box sx={{ width: '60%', mb: 2 }}>
+                    <LinearProgress variant="determinate" value={extractProgress}
+                        sx={{ height: 10, borderRadius: 5 }} />
+                </Box>
+                <Typography variant="body2" color="primary" sx={{ fontWeight: 600 }}>
+                    {extractProgress}%
+                </Typography>
+                <Typography variant="caption" color="textSecondary" sx={{ mt: 2 }}>
+                    Using scispaCy + Llama 3.1 to extract structured rules from the protocol
+                </Typography>
             </Box>
         );
     }
 
     return (
         <Box sx={{ pb: 6 }}>
-            {/* Header Section */}
             <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', mb: 4 }}>
                 <Box>
                     <Typography variant="h4" sx={{ fontWeight: 800, color: '#102a43', mb: 1 }}>
@@ -123,20 +179,13 @@ const CriteriaPage = () => {
                     </Typography>
                 </Box>
                 <Stack direction="row" spacing={1}>
-                    <Button
-                        variant="outlined"
-                        startIcon={<AutoStories />}
-                        onClick={() => setGlossaryOpen(true)}
-                        sx={{ borderRadius: 2 }}
-                    >
+                    <Button variant="outlined" startIcon={<AutoStories />}
+                        onClick={() => setGlossaryOpen(true)} sx={{ borderRadius: 2 }}>
                         Medical Glossary ({glossaryTerms.length})
                     </Button>
-                    <Button
-                        variant="contained"
-                        endIcon={<PlayArrow />}
+                    <Button variant="contained" endIcon={<PlayArrow />}
                         onClick={() => navigate(`/trial/${trialId}/screening`)}
-                        sx={{ borderRadius: 2, px: 3, bgcolor: '#102a43' }}
-                    >
+                        sx={{ borderRadius: 2, px: 3, bgcolor: '#102a43' }}>
                         Analyze Patient Match
                     </Button>
                 </Stack>
@@ -144,22 +193,11 @@ const CriteriaPage = () => {
 
             {error && <Alert severity="error" sx={{ mb: 3 }}>{error}</Alert>}
 
-            {/* Stats Card */}
-            <Paper sx={{
-                p: 3, mb: 4,
-                bgcolor: '#f8fafc',
-                border: '1px solid #e2e8f0',
-                borderRadius: 2,
-            }}>
+            <Paper sx={{ p: 3, mb: 4, bgcolor: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 2 }}>
                 <Grid container alignItems="center" spacing={4}>
                     <Grid item xs={12} md={7}>
                         <Box sx={{ display: 'flex', alignItems: 'center', gap: 2.5 }}>
-                            <Box sx={{
-                                bgcolor: 'white',
-                                p: 1.5, borderRadius: 2,
-                                display: 'flex',
-                                boxShadow: '0 1px 3px rgba(0,0,0,0.1)'
-                            }}>
+                            <Box sx={{ bgcolor: 'white', p: 1.5, borderRadius: 2, display: 'flex', boxShadow: '0 1px 3px rgba(0,0,0,0.1)' }}>
                                 <Psychology sx={{ fontSize: 32, color: '#475569' }} />
                             </Box>
                             <Box>
@@ -193,30 +231,15 @@ const CriteriaPage = () => {
                 </Grid>
             </Paper>
 
-            {/* Rule Type Summary Card */}
             {Object.keys(ruleTypeSummary).length > 0 && (
                 <Paper sx={{ p: 3, mb: 3, borderRadius: 2, border: '1px solid #e2e8f0' }}>
-                    <Typography variant="h6" sx={{ fontWeight: 700, mb: 2 }}>
-                        Rule Type Distribution
-                    </Typography>
+                    <Typography variant="h6" sx={{ fontWeight: 700, mb: 2 }}>Rule Type Distribution</Typography>
                     <Grid container spacing={2}>
                         {Object.entries(ruleTypeSummary).map(([type, count]) => (
                             <Grid item xs={6} sm={4} md={3} key={type}>
-                                <Box sx={{
-                                    p: 1.5,
-                                    borderRadius: 1,
-                                    bgcolor: '#f8fafc',
-                                    border: '1px solid #e2e8f0'
-                                }}>
-                                    <Typography variant="h5" sx={{ fontWeight: 800, color: '#102a43' }}>
-                                        {count}
-                                    </Typography>
-                                    <Typography variant="caption" sx={{
-                                        color: '#64748b',
-                                        textTransform: 'uppercase',
-                                        fontWeight: 600,
-                                        fontSize: '0.65rem'
-                                    }}>
+                                <Box sx={{ p: 1.5, borderRadius: 1, bgcolor: '#f8fafc', border: '1px solid #e2e8f0' }}>
+                                    <Typography variant="h5" sx={{ fontWeight: 800, color: '#102a43' }}>{count}</Typography>
+                                    <Typography variant="caption" sx={{ color: '#64748b', textTransform: 'uppercase', fontWeight: 600, fontSize: '0.65rem' }}>
                                         {type.replace(/_/g, ' ')}
                                     </Typography>
                                 </Box>
@@ -226,52 +249,29 @@ const CriteriaPage = () => {
                 </Paper>
             )}
 
-            {/* Tabs for filtering */}
             <Paper sx={{ mb: 3, borderRadius: 2 }}>
-                <Tabs
-                    value={activeTab}
-                    onChange={(e, v) => setActiveTab(v)}
-                    variant="scrollable"
-                    scrollButtons="auto"
-                    sx={{
-                        '& .MuiTab-root': {
-                            textTransform: 'none',
-                            fontWeight: 600,
-                            minHeight: 48
-                        }
-                    }}
-                >
+                <Tabs value={activeTab} onChange={(e, v) => setActiveTab(v)} variant="scrollable" scrollButtons="auto"
+                    sx={{ '& .MuiTab-root': { textTransform: 'none', fontWeight: 600, minHeight: 48 } }}>
                     {tabs.map((tab, idx) => (
-                        <Tab
-                            key={idx}
-                            label={
-                                <Stack direction="row" spacing={1} alignItems="center">
-                                    <span>{tab.label}</span>
-                                    <Chip
-                                        label={tab.count}
-                                        size="small"
-                                        sx={{
-                                            height: 20,
-                                            fontSize: '0.7rem',
-                                            bgcolor: activeTab === idx ? '#102a43' : '#e2e8f0',
-                                            color: activeTab === idx ? 'white' : '#475569'
-                                        }}
-                                    />
-                                </Stack>
-                            }
-                        />
+                        <Tab key={idx} label={
+                            <Stack direction="row" spacing={1} alignItems="center">
+                                <span>{tab.label}</span>
+                                <Chip label={tab.count} size="small" sx={{
+                                    height: 20, fontSize: '0.7rem',
+                                    bgcolor: activeTab === idx ? '#102a43' : '#e2e8f0',
+                                    color: activeTab === idx ? 'white' : '#475569'
+                                }} />
+                            </Stack>
+                        } />
                     ))}
                 </Tabs>
             </Paper>
 
-            {/* Rules Grid */}
             <Grid container spacing={3}>
                 {getFilteredRules().map((rule, idx) => (
                     <Grid item xs={12} md={6} key={rule.id || idx}>
                         <Fade in={true} timeout={300 + idx * 100}>
-                            <Box>
-                                <RuleCard rule={rule} />
-                            </Box>
+                            <Box><RuleCard rule={rule} /></Box>
                         </Fade>
                     </Grid>
                 ))}
@@ -284,25 +284,17 @@ const CriteriaPage = () => {
                 )}
             </Grid>
 
-            {/* Dynamic Glossary Drawer */}
-            <Drawer
-                anchor="right"
-                open={glossaryOpen}
-                onClose={() => setGlossaryOpen(false)}
-                PaperProps={{ sx: { width: { xs: '100%', sm: 420 }, p: 3 } }}
-            >
+            <Drawer anchor="right" open={glossaryOpen} onClose={() => setGlossaryOpen(false)}
+                PaperProps={{ sx: { width: { xs: '100%', sm: 420 }, p: 3 } }}>
                 <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 3 }}>
                     <Typography variant="h5" sx={{ fontWeight: 800, display: 'flex', alignItems: 'center', gap: 1 }}>
                         <AutoStories color="primary" /> Extracted Medical Terms
                     </Typography>
-                    <IconButton onClick={() => setGlossaryOpen(false)}>
-                        <Close />
-                    </IconButton>
+                    <IconButton onClick={() => setGlossaryOpen(false)}><Close /></IconButton>
                 </Box>
                 <Typography variant="body2" color="textSecondary" sx={{ mb: 3 }}>
                     Dynamic glossary built from NLP entity extraction using scispaCy.
                 </Typography>
-
                 {glossaryTerms.length > 0 ? (
                     <List disablePadding>
                         {glossaryTerms.map((term, index) => (
@@ -321,30 +313,17 @@ const CriteriaPage = () => {
                                         primary={
                                             <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
                                                 <Typography sx={{ fontWeight: 700, color: '#102a43' }}>{term.term}</Typography>
-                                                <Chip
-                                                    label={term.used_in}
-                                                    size="small"
-                                                    sx={{
-                                                        height: 18,
-                                                        fontSize: '0.6rem',
-                                                        bgcolor: term.used_in === 'inclusion' ? '#d1fae5' : '#fecdd3',
-                                                        color: term.used_in === 'inclusion' ? '#047857' : '#be123c'
-                                                    }}
-                                                />
+                                                <Chip label={term.used_in} size="small" sx={{
+                                                    height: 18, fontSize: '0.6rem',
+                                                    bgcolor: term.used_in === 'inclusion' ? '#d1fae5' : '#fecdd3',
+                                                    color: term.used_in === 'inclusion' ? '#047857' : '#be123c'
+                                                }} />
                                             </Box>
                                         }
                                         secondary={
                                             <Box>
-                                                {term.semantic_type && (
-                                                    <Typography variant="caption" sx={{ color: '#64748b' }}>
-                                                        Type: {term.semantic_type}
-                                                    </Typography>
-                                                )}
-                                                {term.umls_cui && (
-                                                    <Typography variant="caption" sx={{ display: 'block', color: '#94a3b8' }}>
-                                                        UMLS: {term.umls_cui}
-                                                    </Typography>
-                                                )}
+                                                {term.semantic_type && <Typography variant="caption" sx={{ color: '#64748b' }}>Type: {term.semantic_type}</Typography>}
+                                                {term.umls_cui && <Typography variant="caption" sx={{ display: 'block', color: '#94a3b8' }}>UMLS: {term.umls_cui}</Typography>}
                                             </Box>
                                         }
                                     />
@@ -358,7 +337,6 @@ const CriteriaPage = () => {
                         <Typography color="textSecondary">No medical terms extracted yet.</Typography>
                     </Box>
                 )}
-
                 <Box sx={{ mt: 'auto', p: 2, bgcolor: '#f0f4f8', borderRadius: 2 }}>
                     <Typography variant="caption" sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
                         <BarChart fontSize="inherit" /> Terms extracted dynamically via scispaCy NLP

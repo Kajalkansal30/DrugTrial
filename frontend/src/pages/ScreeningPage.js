@@ -24,9 +24,11 @@ const ScreeningPage = ({ trialData }) => {
     const [currentAnalysis, setCurrentAnalysis] = useState(null);
 
     const API_URL = process.env.REACT_APP_API_URL || '';
+    const [analysisTriggered, setAnalysisTriggered] = useState(false);
 
     useEffect(() => {
         fetchData();
+        triggerAnalysis();
     }, [trialId]);
 
     useEffect(() => {
@@ -34,6 +36,14 @@ const ScreeningPage = ({ trialData }) => {
             runFullScreening();
         }
     }, [patients, screeningDone]);
+
+    const triggerAnalysis = async () => {
+        if (analysisTriggered) return;
+        setAnalysisTriggered(true);
+        try {
+            await axios.post(`${API_URL}/api/trials/${trialId}/run-analysis`);
+        } catch (_) { /* best-effort */ }
+    };
 
     const fetchData = async () => {
         try {

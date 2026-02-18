@@ -148,7 +148,26 @@ function FDAProcessingPage() {
     const handleViewDocument = async (id) => {
         try {
             const response = await axios.get(`${API_BASE}/api/fda/forms/${id}`);
-            setSelectedDocument(response.data);
+            let docData = response.data;
+
+            if (!docData.trial) {
+                try {
+                    const trialRes = await axios.post(`${API_BASE}/api/fda/documents/${id}/create-trial`);
+                    docData = {
+                        ...docData,
+                        trial: {
+                            trial_id: trialRes.data.trial_id,
+                            db_id: trialRes.data.db_id,
+                            status: 'Pending Criteria',
+                            analysis_status: 'pending',
+                        }
+                    };
+                } catch (trialErr) {
+                    console.warn('Auto-create trial skipped:', trialErr.message);
+                }
+            }
+
+            setSelectedDocument(docData);
             setShowFormViewer(true);
         } catch (error) {
             console.error('Error loading document:', error);
@@ -181,13 +200,16 @@ function FDAProcessingPage() {
         return <span className={`status-badge ${badge.className}`}>{badge.label}</span>;
     };
 
-    // Wizard: Continue Logic
     const handleContinueWizard = async () => {
         if (!selectedDocument || continuing) return;
         setContinuing(true);
         try {
-            const res = await axios.post(`${API_BASE}/api/fda/documents/${selectedDocument.document.id}/create-trial`);
-            navigate(`/trial/${res.data.trial_id}/criteria`);
+            if (selectedDocument.trial?.trial_id) {
+                navigate(`/trial/${selectedDocument.trial.trial_id}/criteria`);
+            } else {
+                const res = await axios.post(`${API_BASE}/api/fda/documents/${selectedDocument.document.id}/create-trial`);
+                navigate(`/trial/${res.data.trial_id}/criteria`);
+            }
         } catch (error) {
             console.error("Error creating trial:", error);
             alert("Failed to proceed: " + error.message);
@@ -459,7 +481,7 @@ function FDAFormViewer({ document, onClose, isWizard, onContinue, continuing }) 
     // In Wizard Mode, we want to allow continue IF signed (or reviewed?)
     // User requested "only review and sign and move to next page"
     // So "Continue to Criteria" should appear after signing.
-    const showContinue = isWizard && (isSigned || localStatus === 'signed');
+    const showContinue = isWizard && (localStatus === 'reviewed' || localStatus === 'signed');
 
     const renderField = (label, field, value, formType) => {
         const isNull = value === null || value === undefined || value === '';
