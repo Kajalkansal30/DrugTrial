@@ -325,6 +325,10 @@ def get_database():
             try:
                 conn.execute(sa_text("ALTER TABLE clinical_trials ADD COLUMN IF NOT EXISTS analysis_results JSON"))
                 conn.execute(sa_text("ALTER TABLE clinical_trials ADD COLUMN IF NOT EXISTS analysis_status VARCHAR(20) DEFAULT 'pending'"))
+                conn.execute(sa_text("ALTER TABLE clinical_trials ADD COLUMN IF NOT EXISTS document_id INTEGER"))
+                conn.execute(sa_text("ALTER TABLE clinical_trials ADD COLUMN IF NOT EXISTS fda_1571 JSON"))
+                conn.execute(sa_text("ALTER TABLE clinical_trials ADD COLUMN IF NOT EXISTS fda_1572 JSON"))
+                conn.execute(sa_text("ALTER TABLE clinical_trials ADD COLUMN IF NOT EXISTS matching_config JSON"))
                 conn.execute(sa_text("ALTER TABLE patient_eligibility ADD COLUMN IF NOT EXISTS organization_id INTEGER"))
                 conn.commit()
             except Exception:
