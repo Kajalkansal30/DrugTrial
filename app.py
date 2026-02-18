@@ -521,4 +521,10 @@ async def get_stats():
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", 8201))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    uvicorn.run(
+        app, 
+        host="0.0.0.0", 
+        port=port,
+        timeout_keep_alive=600,  # 10 minutes for long-running uploads
+        timeout_graceful_shutdown=30
+    )
