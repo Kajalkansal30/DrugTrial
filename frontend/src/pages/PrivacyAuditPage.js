@@ -9,7 +9,7 @@ import {
     CompareArrows, Visibility, VisibilityOff, Refresh
 } from '@mui/icons-material';
 
-const API_URL = process.env.REACT_APP_API_URL || '';
+const API_URL = import.meta.env.VITE_API_URL || '';
 const API_BASE = `${API_URL}/api`;
 
 const PrivacyAuditPage = () => {

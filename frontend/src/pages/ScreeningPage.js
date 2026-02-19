@@ -5,7 +5,7 @@ import {
     CircularProgress, LinearProgress, Alert, Tooltip
 } from '@mui/material';
 import { VerifiedUser, Group, Analytics, FactCheck, HelpCenter, Refresh, Warning } from '@mui/icons-material';
-import axios from 'axios';
+import apiClient from '../utils/apiClient';
 import { useParams } from 'react-router-dom';
 import TrialAnalysisSidebar from '../components/TrialAnalysisSidebar';
 
@@ -23,7 +23,7 @@ const ScreeningPage = ({ trialData }) => {
     const [analysisOpen, setAnalysisOpen] = useState(false);
     const [currentAnalysis, setCurrentAnalysis] = useState(null);
 
-    const API_URL = process.env.REACT_APP_API_URL || '';
+    const API_URL = import.meta.env.VITE_API_URL || '';
     const [analysisTriggered, setAnalysisTriggered] = useState(false);
 
     useEffect(() => {
@@ -41,14 +41,14 @@ const ScreeningPage = ({ trialData }) => {
         if (analysisTriggered) return;
         setAnalysisTriggered(true);
         try {
-            await axios.post(`${API_URL}/api/trials/${trialId}/run-analysis`);
+            await apiClient.post(`/api/trials/${trialId}/run-analysis`);
         } catch (_) { /* best-effort */ }
     };
 
     const fetchData = async () => {
         try {
             setLoading(true);
-            const response = await axios.get(`${API_URL}/api/patients`);
+            const response = await apiClient.get('/api/patients');
             const patientList = response.data.patients || [];
             setPatients(patientList);
             setStats(prev => ({ ...prev, total: patientList.length }));
@@ -65,7 +65,7 @@ const ScreeningPage = ({ trialData }) => {
         setProgress(0);
 
         try {
-            const trialRes = await axios.get(`${API_URL}/api/trials/${trialId}/rules`);
+            const trialRes = await apiClient.get(`/api/trials/${trialId}/rules`);
             const dbTrialId = trialRes.data.id;
 
             if (!dbTrialId) {
@@ -77,7 +77,7 @@ const ScreeningPage = ({ trialData }) => {
             const patientIds = patients.map(p => p.id);
             setProgress(10);
 
-            const res = await axios.post(`${API_URL}/api/eligibility/batch-check`, {
+            const res = await apiClient.post('/api/eligibility/batch-check', {
                 patient_ids: patientIds,
                 trial_id: dbTrialId
             });

@@ -434,6 +434,38 @@ async def check_eligibility(request: EligibilityRequest):
     finally:
         session.close()
 
+@app.get("/api/eligibility/results/{trial_id}")
+async def get_eligibility_results(trial_id: int):
+    """Get all eligibility results for a specific trial"""
+    from backend.db_models import EligibilityAudit
+    
+    session = get_session()
+    try:
+        # Get eligibility results from patient_eligibility table
+        results = session.query(PatientEligibility).filter_by(trial_id=trial_id).all()
+        
+        # Also get detailed audits if available
+        audits = session.query(EligibilityAudit).filter_by(trial_id=trial_id).all()
+        audit_map = {a.patient_id: a for a in audits}
+        
+        output = []
+        for result in results:
+            audit = audit_map.get(result.patient_id)
+            output.append({
+                "patient_id": result.patient_id,
+                "trial_id": result.trial_id,
+                "status": audit.status if audit else result.eligibility_status.upper(),
+                "confidence": audit.confidence if audit else result.confidence_score,
+                "criteria_met": audit.criteria_met if audit else None,
+                "criteria_total": audit.criteria_total if audit else None,
+                "evaluation_date": result.evaluation_date.isoformat() if result.evaluation_date else None,
+                "details": audit.details if audit else None
+            })
+        
+        return output
+    finally:
+        session.close()
+
 @app.post("/api/fda/extract")
 async def extract_fda_forms(pdf_filename: str = "2.pdf"):
     """Extract FDA form data from drug documentation PDF"""

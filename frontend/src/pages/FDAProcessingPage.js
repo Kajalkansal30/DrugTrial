@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import axios from 'axios';
+import apiClient from '../utils/apiClient';
 import { useParams, useNavigate } from 'react-router-dom';
 import {
     CircularProgress,
@@ -19,7 +19,7 @@ import InSilicoDashboard from '../components/InSilicoDashboard';
 import TrialReportModal from '../components/TrialReportModal';
 import './FDAProcessingPage.css';
 
-const API_BASE = process.env.REACT_APP_API_URL || '';
+const API_BASE = import.meta.env.VITE_API_URL || '';
 
 function FDAProcessingPage() {
     const { documentId } = useParams(); // Wizard mode if present
@@ -44,8 +44,8 @@ function FDAProcessingPage() {
 
     const loadDocuments = async () => {
         try {
-            const response = await axios.get(`${API_BASE}/api/fda/documents`);
-            setDocuments(response.data.documents);
+            const response = await apiClient.get('/api/fda/documents');
+            setDocuments(response.data.documents || response.data);
         } catch (error) {
             console.error('Error loading documents:', error);
             // Don't alert in wizard mode if list fails provided specific doc works
@@ -147,12 +147,12 @@ function FDAProcessingPage() {
 
     const handleViewDocument = async (id) => {
         try {
-            const response = await axios.get(`${API_BASE}/api/fda/forms/${id}`);
+            const response = await apiClient.get(`/api/fda/forms/${id}`);
             let docData = response.data;
 
             if (!docData.trial) {
                 try {
-                    const trialRes = await axios.post(`${API_BASE}/api/fda/documents/${id}/create-trial`);
+                    const trialRes = await apiClient.post(`/api/fda/documents/${id}/create-trial`);
                     docData = {
                         ...docData,
                         trial: {
@@ -181,7 +181,7 @@ function FDAProcessingPage() {
         }
 
         try {
-            await axios.delete(`${API_BASE}/api/fda/documents/${id}`);
+            await apiClient.delete(`/api/fda/documents/${id}`);
             alert('Document deleted successfully');
             loadDocuments();
         } catch (error) {
@@ -207,7 +207,7 @@ function FDAProcessingPage() {
             if (selectedDocument.trial?.trial_id) {
                 navigate(`/trial/${selectedDocument.trial.trial_id}/criteria`);
             } else {
-                const res = await axios.post(`${API_BASE}/api/fda/documents/${selectedDocument.document.id}/create-trial`);
+                const res = await apiClient.post(`/api/fda/documents/${selectedDocument.document.id}/create-trial`);
                 navigate(`/trial/${res.data.trial_id}/criteria`);
             }
         } catch (error) {
@@ -402,7 +402,7 @@ function FDAFormViewer({ document, onClose, isWizard, onContinue, continuing }) 
     const handleSave = async () => {
         setSaving(true);
         try {
-            await axios.put(`${API_BASE}/api/fda/forms/${document.document.id}`, {
+            await apiClient.put(`/api/fda/forms/${document.document.id}`, {
                 form_type: activeTab,
                 updates: formData[activeTab],
             });
@@ -419,7 +419,7 @@ function FDAFormViewer({ document, onClose, isWizard, onContinue, continuing }) 
         if (!reviewerName) return;
 
         try {
-            await axios.post(`${API_BASE}/api/fda/forms/${document.document.id}/review`, {
+            await apiClient.post(`/api/fda/forms/${document.document.id}/review`, {
                 reviewed_by: reviewerName,
             });
             alert('Document marked as reviewed');
@@ -436,7 +436,7 @@ function FDAFormViewer({ document, onClose, isWizard, onContinue, continuing }) 
 
         if (!isPolling) setLoadingIntel(true);
         try {
-            const response = await axios.get(`${API_BASE}/api/ltaa/report/${encodeURIComponent(disease)}`);
+            const response = await apiClient.get(`/api/ltaa/report/${encodeURIComponent(disease)}`);
             setIntelData(response.data);
             return response.data;
         } catch (error) {
@@ -468,7 +468,7 @@ function FDAFormViewer({ document, onClose, isWizard, onContinue, continuing }) 
 
     const handleSign = async (signatureData) => {
         try {
-            await axios.post(`${API_BASE}/api/fda/forms/${document.document.id}/sign`, signatureData);
+            await apiClient.post(`/api/fda/forms/${document.document.id}/sign`, signatureData);
             alert('Document signed successfully');
             setShowSignModal(false);
             setLocalStatus('signed');

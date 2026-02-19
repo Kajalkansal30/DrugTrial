@@ -13,14 +13,13 @@ import {
     Refresh,
     Verified
 } from '@mui/icons-material';
-import axios from 'axios';
+import apiClient from '../utils/apiClient';
 
 const AuditTrailPage = () => {
     const [logs, setLogs] = useState([]);
     const [loading, setLoading] = useState(true);
     const [verifying, setVerifying] = useState(false);
     const [integrityStatus, setIntegrityStatus] = useState(null);
-    const API_URL = process.env.REACT_APP_API_URL || '';
 
     useEffect(() => {
         fetchLogs();
@@ -29,7 +28,7 @@ const AuditTrailPage = () => {
     const fetchLogs = async () => {
         setLoading(true);
         try {
-            const response = await axios.get(`${API_URL}/api/audit/logs`);
+            const response = await apiClient.get('/api/audit/logs');
             setLogs(response.data);
         } catch (err) {
             console.error("Failed to fetch audit logs", err);
@@ -41,7 +40,7 @@ const AuditTrailPage = () => {
     const verifyIntegrity = async () => {
         setVerifying(true);
         try {
-            const response = await axios.get(`${API_URL}/api/audit/verify-integrity`);
+            const response = await apiClient.get('/api/audit/verify-integrity');
             setIntegrityStatus(response.data);
         } catch (err) {
             console.error("Failed to verify integrity", err);

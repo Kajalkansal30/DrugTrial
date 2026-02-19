@@ -12,9 +12,9 @@ import {
     AreaChart, Area, XAxis, YAxis, CartesianGrid,
     Tooltip as ChartTooltip, ResponsiveContainer
 } from 'recharts';
-import axios from 'axios';
+import apiClient from '../utils/apiClient';
 
-const API_BASE = process.env.REACT_APP_API_URL || '';
+const API_BASE = import.meta.env.VITE_API_URL || '';
 
 const ToxicityIcon = ({ tox }) => {
     if (!tox) return <ScienceOutlined sx={{ color: '#9fa8da' }} />;
@@ -42,7 +42,7 @@ const InSilicoDashboard = ({ trialId, indication, isActive, onDataLoaded }) => {
 
         const fetchData = async () => {
             try {
-                const cacheRes = await axios.get(`${API_BASE}/api/insilico/results/${trialId}`);
+                const cacheRes = await apiClient.get(`/api/insilico/results/${trialId}`);
                 if (cacheRes.data.status === 'ready') {
                     setData(cacheRes.data);
                     setLoading(false);
@@ -81,7 +81,7 @@ const InSilicoDashboard = ({ trialId, indication, isActive, onDataLoaded }) => {
         if (!polling || !trialId || !isActive) return;
         const interval = setInterval(async () => {
             try {
-                const res = await axios.get(`${API_BASE}/api/insilico/results/${trialId}`);
+                const res = await apiClient.get(`/api/insilico/results/${trialId}`);
                 if (res.data.status === 'ready') {
                     setData(res.data);
                     setPolling(false);

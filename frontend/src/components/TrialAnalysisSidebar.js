@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import axios from 'axios';
+import apiClient from '../utils/apiClient';
 import {
     Drawer, Box, Typography, Divider, List, ListItem,
     ListItemIcon, ListItemText, Chip, Grid, Paper, IconButton,
@@ -14,7 +14,7 @@ import {
 const TrialAnalysisSidebar = ({ open, onClose, patient, trial, analysis }) => {
     const [patientDetails, setPatientDetails] = useState(null);
     const [loadingDetails, setLoadingDetails] = useState(false);
-    const API_URL = process.env.REACT_APP_API_URL || '';
+    const API_URL = import.meta.env.VITE_API_URL || '';
 
     useEffect(() => {
         if (open && patient) {
@@ -27,7 +27,7 @@ const TrialAnalysisSidebar = ({ open, onClose, patient, trial, analysis }) => {
     const fetchPatientDetails = async () => {
         try {
             setLoadingDetails(true);
-            const res = await axios.get(`${API_URL}/api/patients/${patient.id}`);
+            const res = await apiClient.get(`/api/patients/${patient.id}`);
             setPatientDetails(res.data);
             setLoadingDetails(false);
         } catch (err) {

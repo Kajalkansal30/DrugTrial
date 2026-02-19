@@ -1,0 +1,117 @@
+// This is your Prisma schema file
+// Learn more: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Organization {
+  id        Int      @id @default(autoincrement())
+  name      String   @unique
+  domain    String?
+  status    String   @default("active")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  users            User[]
+  clinicalTrials   ClinicalTrial[]
+  fdaDocuments     FDADocument[]
+  auditLogs        AuditLog[]
+
+  @@map("organizations")
+}
+
+model User {
+  id             Int       @id @default(autoincrement())
+  username       String    @unique
+  passwordHash   String    @map("password_hash")
+  email          String?
+  fullName       String?   @map("full_name")
+  organizationId Int       @map("organization_id")
+  role           String    @default("user")
+  status         String    @default("active")
+  lastLogin      DateTime? @map("last_login")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([username])
+  @@index([organizationId])
+  @@index([status])
+  @@map("users")
+}
+
+// Extend existing tables with organization_id
+model ClinicalTrial {
+  id              Int      @id @default(autoincrement())
+  trialId         String   @unique @map("trial_id")
+  protocolTitle   String?  @map("protocol_title")
+  phase           String?
+  indication      String?
+  drugName        String?  @map("drug_name")
+  status          String?
+  documentId      Int?     @map("document_id")
+  fda1571         Json?    @map("fda_1571")
+  fda1572         Json?    @map("fda_1572")
+  matchingConfig  Json?    @map("matching_config")
+  analysisResults Json?    @map("analysis_results")
+  analysisStatus  String?  @default("pending") @map("analysis_status")
+  organizationId  Int?     @map("organization_id")
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  organization Organization? @relation(fields: [organizationId], references: [id])
+  fdaDocument  FDADocument?  @relation(fields: [documentId], references: [id])
+
+  @@index([organizationId])
+  @@index([documentId])
+  @@map("clinical_trials")
+}
+
+model FDADocument {
+  id             Int       @id @default(autoincrement())
+  filename       String
+  fileHash       String    @map("file_hash")
+  uploadDate     DateTime  @default(now()) @map("upload_date")
+  status         String    @default("extracted")
+  processedAt    DateTime? @map("processed_at")
+  reviewedAt     DateTime? @map("reviewed_at")
+  reviewedBy     String?   @map("reviewed_by")
+  signedAt       DateTime? @map("signed_at")
+  signedBy       String?   @map("signed_by")
+  signatureData  String?   @map("signature_data")
+  organizationId Int?      @map("organization_id")
+
+  organization   Organization?   @relation(fields: [organizationId], references: [id])
+  clinicalTrials ClinicalTrial[]
+
+  @@index([organizationId])
+  @@map("fda_documents")
+}
+
+model AuditLog {
+  id            Int       @id @default(autoincrement())
+  timestamp     DateTime  @default(now())
+  action        String
+  targetType    String?   @map("target_type")
+  targetId      String?   @map("target_id")
+  agent         String
+  status        String
+  details       Json?
+  documentHash  String?   @map("document_hash")
+  previousHash  String?   @map("previous_hash")
+  entryHash     String?   @map("entry_hash")
+  organizationId Int?     @map("organization_id")
+
+  organization Organization? @relation(fields: [organizationId], references: [id])
+
+  @@index([organizationId])
+  @@index([action])
+  @@index([timestamp])
+  @@map("audit_trail")
+}
