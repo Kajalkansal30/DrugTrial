@@ -201,6 +201,10 @@ def _run_fda_extraction(doc_id: int, filename: str, file_path: str):
         _update_status(doc_id, "done", "✅ FDA forms extracted — ready for review", 100,
                         document_id=doc_id)
 
+        indication = form_1571_data.get('indication', 'Unknown')
+        drug_name = form_1571_data.get('drug_name', 'Unknown')
+        _kick_off_pre_trial_analysis(doc_id, indication, drug_name, file_path)
+
     except Exception as e:
         logger.exception("FDA extraction failed for doc %s", doc_id)
         session.rollback()
@@ -222,6 +226,45 @@ def _run_fda_extraction(doc_id: int, filename: str, file_path: str):
         _update_status(doc_id, "error", f"❌ {str(e)}", 0)
     finally:
         session.close()
+
+
+def _kick_off_pre_trial_analysis(doc_id: int, indication: str, drug_name: str, file_path: str):
+    """Run LTAA + InSilico immediately after FDA extraction, before trial creation."""
+    import threading, logging
+    logger = logging.getLogger("fda_pre_analysis")
+
+    def _run():
+        try:
+            full_text = ""
+            try:
+                import pdfplumber
+                with pdfplumber.open(file_path) as pdf:
+                    full_text = "\n".join(pg.extract_text() or "" for pg in pdf.pages)
+            except Exception:
+                pass
+
+            doc_key = f"doc_{doc_id}"
+
+            if indication and indication != "Unknown":
+                logger.info(f"Pre-trial LTAA starting for doc {doc_id}: {indication}")
+                try:
+                    from backend.routers.trials import run_ltaa_analysis
+                    run_ltaa_analysis(indication, doc_key)
+                except Exception as e:
+                    logger.error(f"Pre-trial LTAA failed: {e}")
+
+            if full_text:
+                logger.info(f"Pre-trial InSilico starting for doc {doc_id}")
+                try:
+                    from backend.routers.trials import run_insilico_analysis
+                    run_insilico_analysis(doc_key, full_text)
+                except Exception as e:
+                    logger.error(f"Pre-trial InSilico failed: {e}")
+
+        except Exception as e:
+            logger.error(f"Pre-trial analysis thread failed for doc {doc_id}: {e}")
+
+    threading.Thread(target=_run, daemon=True).start()
 
 
 @router.get("/documents")
@@ -565,7 +608,6 @@ async def test_criteria(request: TestRequest):
 @router.post("/documents/{document_id}/create-trial")
 async def create_trial_from_document(
     document_id: int,
-    background_tasks: BackgroundTasks,
     session: Session = Depends(get_session)
 ):
     """
@@ -645,16 +687,13 @@ async def create_trial_from_document(
             details={"document_id": document_id, "filename": doc.filename},
         )
 
-        background_tasks.add_task(
-            _trigger_analysis_for_trial,
-            new_trial.trial_id, new_trial.id, indication, drug_name, document_id
-        )
+        _bridge_pre_trial_results(document_id, new_trial.trial_id, new_trial.id, indication)
 
         return {
             "success": True,
             "trial_id": new_trial.trial_id,
             "db_id": new_trial.id,
-            "message": "Trial created — analysis starting in background",
+            "message": "Trial created — analysis already running from extraction",
         }
 
     except HTTPException:
@@ -666,20 +705,58 @@ async def create_trial_from_document(
         session.close()
 
 
-def _trigger_analysis_for_trial(trial_id: str, trial_db_id: int, indication: str, drug_name: str, document_id: int):
-    """Fire TRIAL_CREATED event so the orchestrator runs LTAA + InSilico in background."""
-    import logging
-    logger = logging.getLogger("fda_auto_analysis")
-    try:
-        from backend.events import event_bus
-        trial_event = {
-            "trial_id": trial_id,
-            "db_id": trial_db_id,
-            "indication": indication,
-            "drug_name": drug_name,
-            "document_id": document_id,
-        }
-        logger.info(f"Auto-triggering LTAA + InSilico for {trial_id}")
-        event_bus.publish("TRIAL_CREATED", trial_event)
-    except Exception as e:
-        logger.error(f"Failed to auto-trigger analysis for {trial_id}: {e}")
+def _bridge_pre_trial_results(document_id: int, trial_id: str, trial_db_id: int, indication: str):
+    """
+    Copy pre-trial analysis results (keyed by doc_{id}) to the new trial record.
+    - InSilico: copy pickle cache from doc_{id}.pkl to trial_id.pkl
+    - LTAA: look up disease-based cache and persist to trial.analysis_results
+    """
+    import logging, pickle, shutil
+    from pathlib import Path
+    logger = logging.getLogger("bridge_results")
+
+    analysis_results = {}
+
+    # Bridge InSilico: copy doc_{id}.pkl -> trial_id.pkl
+    cache_dir = Path("/app/data/insilico_cache")
+    doc_cache = cache_dir / f"doc_{document_id}.pkl"
+    trial_cache = cache_dir / f"{trial_id}.pkl"
+    if doc_cache.exists() and not trial_cache.exists():
+        try:
+            shutil.copy2(str(doc_cache), str(trial_cache))
+            with open(doc_cache, "rb") as f:
+                analysis_results['insilico'] = pickle.load(f)
+            logger.info(f"Bridged InSilico cache: doc_{document_id} -> {trial_id}")
+        except Exception as e:
+            logger.error(f"Failed to bridge InSilico cache: {e}")
+
+    # Bridge LTAA: check disease-based cache from LTAAAgent
+    if indication and indication != "Unknown":
+        try:
+            from backend.agents.ltaa_agent import LTAAAgent
+            agent = LTAAAgent()
+            cache_key = agent._cache_key(indication, None, 10)
+            cached = agent._load_cache(cache_key)
+            if cached:
+                analysis_results['ltaa'] = cached
+                logger.info(f"Bridged LTAA cache for indication: {indication}")
+        except Exception as e:
+            logger.error(f"Failed to bridge LTAA cache: {e}")
+
+    # Persist to trial record
+    if analysis_results:
+        try:
+            db = get_session()
+            trial = db.query(ClinicalTrial).filter_by(id=trial_db_id).first()
+            if trial:
+                existing = trial.analysis_results or {}
+                existing.update(analysis_results)
+                trial.analysis_results = existing
+                trial.analysis_status = "completed" if ('ltaa' in existing or 'insilico' in existing) else "pending"
+                from sqlalchemy.orm.attributes import flag_modified
+                flag_modified(trial, 'analysis_results')
+                db.commit()
+                logger.info(f"Persisted pre-trial results to trial {trial_id}: ltaa={bool(analysis_results.get('ltaa'))}, insilico={bool(analysis_results.get('insilico'))}")
+            db.close()
+        except Exception as e:
+            logger.error(f"Failed to persist bridged results: {e}")

@@ -51,19 +51,13 @@ const InSilicoDashboard = ({ trialId, indication, isActive, onDataLoaded }) => {
                     return;
                 }
 
-                if (cacheRes.data.status === 'not_started') {
-                    setError(cacheRes.data.message || "No trial created yet. Create a trial from this document to start analysis.");
-                    setLoading(false);
-                    return;
-                }
-
                 if (cacheRes.data.status === 'failed') {
                     setError(cacheRes.data.message || "Analysis failed.");
                     setLoading(false);
                     return;
                 }
 
-                // Background task still running — show pending state and poll
+                // pending / not_started / analyzing — poll until ready
                 setPolling(true);
                 setLoading(false);
             } catch (err) {
@@ -88,7 +82,7 @@ const InSilicoDashboard = ({ trialId, indication, isActive, onDataLoaded }) => {
                     fetchedRef.current = true;
                     if (onDataLoaded) onDataLoaded(res.data);
                 }
-                if (res.data.status === 'not_started' || res.data.status === 'failed') {
+                if (res.data.status === 'failed') {
                     setPolling(false);
                     setError(res.data.message);
                 }
