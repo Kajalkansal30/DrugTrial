@@ -42,6 +42,82 @@ const SectionTitle = ({ number, title }) => (
 
 const FieldRow = ({ label, value }) => {
     if (!value && value !== 0) return null;
+
+    // Handle arrays
+    if (Array.isArray(value)) {
+        if (value.length === 0) return null;
+        return (
+            <TableRow>
+                <TableCell sx={{ fontWeight: 600, color: '#475569', width: '35%', py: 1.2, borderColor: '#f1f5f9', verticalAlign: 'top' }}>{label}</TableCell>
+                <TableCell sx={{ color: '#1e293b', py: 1.2, borderColor: '#f1f5f9' }}>
+                    <ul style={{ margin: 0, paddingLeft: '1.2rem', listStyle: 'none' }}>
+                        {value.map((item, idx) => {
+                            // Handle objects with common patterns
+                            if (typeof item === 'object' && item !== null) {
+                                // Site pattern
+                                if (item.site_name) {
+                                    return (
+                                        <li key={idx} style={{ marginBottom: '0.5rem', paddingLeft: '1rem', position: 'relative' }}>
+                                            <span style={{ position: 'absolute', left: 0, color: '#64748b' }}>•</span>
+                                            <strong>{item.site_name}</strong>
+                                            {item.site_address && <div style={{ color: '#64748b', fontSize: '0.875rem' }}>{item.site_address}</div>}
+                                        </li>
+                                    );
+                                }
+                                // Lab pattern
+                                if (item.lab_name) {
+                                    return (
+                                        <li key={idx} style={{ marginBottom: '0.5rem', paddingLeft: '1rem', position: 'relative' }}>
+                                            <span style={{ position: 'absolute', left: 0, color: '#64748b' }}>•</span>
+                                            <strong>{item.lab_name}</strong>
+                                            {item.lab_address && <div style={{ color: '#64748b', fontSize: '0.875rem' }}>{item.lab_address}</div>}
+                                        </li>
+                                    );
+                                }
+                                // Investigator pattern
+                                if (item.name) {
+                                    return (
+                                        <li key={idx} style={{ marginBottom: '0.5rem', paddingLeft: '1rem', position: 'relative' }}>
+                                            <span style={{ position: 'absolute', left: 0, color: '#64748b' }}>•</span>
+                                            <strong>{item.name}</strong>
+                                            {item.role && <span style={{ color: '#64748b', marginLeft: '0.5rem' }}>({item.role})</span>}
+                                        </li>
+                                    );
+                                }
+                                // Generic object - show as key: value pairs
+                                const entries = Object.entries(item).filter(([_, v]) => v != null);
+                                if (entries.length > 0) {
+                                    return (
+                                        <li key={idx} style={{ marginBottom: '0.5rem', paddingLeft: '1rem', position: 'relative' }}>
+                                            <span style={{ position: 'absolute', left: 0, color: '#64748b' }}>•</span>
+                                            {entries.map(([k, v], i) => (
+                                                <div key={i}>
+                                                    <strong>{k}:</strong> {String(v)}
+                                                </div>
+                                            ))}
+                                        </li>
+                                    );
+                                }
+                            }
+                            // Primitive value
+                            return (
+                                <li key={idx} style={{ marginBottom: '0.25rem', paddingLeft: '1rem', position: 'relative' }}>
+                                    <span style={{ position: 'absolute', left: 0, color: '#64748b' }}>•</span>
+                                    {String(item)}
+                                </li>
+                            );
+                        })}
+                    </ul>
+                </TableCell>
+            </TableRow>
+        );
+    }
+
+    // Handle objects
+    if (typeof value === 'object' && value !== null) {
+        return null; // Skip object display or handle specially
+    }
+
     return (
         <TableRow>
             <TableCell sx={{ fontWeight: 600, color: '#475569', width: '35%', py: 1.2, borderColor: '#f1f5f9' }}>{label}</TableCell>
@@ -110,18 +186,18 @@ const TrialReportModal = ({ open, onClose, formData, intelData, insilicoData, do
                             <Typography variant="overline" sx={{ letterSpacing: 3, color: '#64748b', fontWeight: 600 }}>
                                 CLINICAL TRIAL ANALYSIS REPORT
                             </Typography>
-                            <Typography variant="h4" sx={{ fontWeight: 800, color: '#0f172a', mt: 1, mb: 2 }}>
+                            <Typography variant="h4" sx={{ fontWeight: 800, color: '#0f172a', mt: 1, mb: 2, lineHeight: 1.3 }}>
                                 {fda1571.protocol_title || trial.protocol_title || 'Untitled Protocol'}
                             </Typography>
                             <Box sx={{ display: 'flex', justifyContent: 'center', gap: 2, flexWrap: 'wrap', mb: 2 }}>
-                                {fda1571.drug_name && (
-                                    <Chip label={`Drug: ${fda1571.drug_name}`} sx={{ fontWeight: 600, bgcolor: '#eff6ff', color: '#1e40af' }} />
-                                )}
                                 {fda1571.indication && (
-                                    <Chip label={`Indication: ${fda1571.indication}`} sx={{ fontWeight: 600, bgcolor: '#ecfdf5', color: '#065f46' }} />
+                                    <Chip label={fda1571.indication} sx={{ fontWeight: 600, bgcolor: '#ecfdf5', color: '#065f46' }} />
                                 )}
                                 {fda1571.study_phase && (
-                                    <Chip label={`Phase: ${fda1571.study_phase}`} sx={{ fontWeight: 600, bgcolor: '#fef3c7', color: '#92400e' }} />
+                                    <Chip label={fda1571.study_phase} sx={{ fontWeight: 600, bgcolor: '#fef3c7', color: '#92400e' }} />
+                                )}
+                                {fda1571.route_of_administration && (
+                                    <Chip label={fda1571.route_of_administration} sx={{ fontWeight: 600, bgcolor: '#eff6ff', color: '#1e40af' }} />
                                 )}
                             </Box>
                             <Typography variant="body2" color="text.secondary">
@@ -142,6 +218,7 @@ const TrialReportModal = ({ open, onClose, formData, intelData, insilicoData, do
                                         <FieldRow label="Dosage Form" value={fda1571.dosage_form} />
                                         <FieldRow label="Route of Administration" value={fda1571.route_of_administration} />
                                         <FieldRow label="Indication" value={fda1571.indication} />
+                                        <FieldRow label="Manufacturer(s)" value={fda1571.manufacturer} />
                                         <TableRow sx={{ bgcolor: '#f8fafc' }}>
                                             <TableCell colSpan={2} sx={{ fontWeight: 700, color: '#334155', py: 1.5 }}>Study Information</TableCell>
                                         </TableRow>
@@ -155,6 +232,7 @@ const TrialReportModal = ({ open, onClose, formData, intelData, insilicoData, do
                                         </TableRow>
                                         <FieldRow label="Sponsor Name" value={fda1571.sponsor_name} />
                                         <FieldRow label="Sponsor Address" value={fda1571.sponsor_address} />
+                                        <FieldRow label="Sponsor Phone" value={fda1571.sponsor_phone} />
                                         <FieldRow label="Contact Person" value={fda1571.contact_person} />
                                         <FieldRow label="Contact Phone" value={fda1571.contact_phone} />
                                         <FieldRow label="Contact Email" value={fda1571.contact_email} />
@@ -187,21 +265,9 @@ const TrialReportModal = ({ open, onClose, formData, intelData, insilicoData, do
                                         </TableRow>
                                         <FieldRow label="IRB Name" value={fda1572.irb_name} />
                                         <FieldRow label="IRB Address" value={fda1572.irb_address} />
-                                        <FieldRow label="Study Sites" value={
-                                            Array.isArray(fda1572.study_sites)
-                                                ? fda1572.study_sites.join('; ')
-                                                : fda1572.study_sites
-                                        } />
-                                        <FieldRow label="Sub-Investigators" value={
-                                            Array.isArray(fda1572.sub_investigators)
-                                                ? fda1572.sub_investigators.join('; ')
-                                                : fda1572.sub_investigators
-                                        } />
-                                        <FieldRow label="Clinical Laboratories" value={
-                                            Array.isArray(fda1572.clinical_laboratories)
-                                                ? fda1572.clinical_laboratories.join('; ')
-                                                : fda1572.clinical_laboratories
-                                        } />
+                                        <FieldRow label="Study Sites" value={fda1572.study_sites} />
+                                        <FieldRow label="Sub-Investigators" value={fda1572.sub_investigators} />
+                                        <FieldRow label="Clinical Laboratories" value={fda1572.clinical_laboratories} />
                                     </TableBody>
                                 </Table>
                             </TableContainer>
@@ -210,13 +276,15 @@ const TrialReportModal = ({ open, onClose, formData, intelData, insilicoData, do
                         {/* ── Section 3: LTAA Research Intelligence ── */}
                         <Box className="report-section report-page-break">
                             <SectionTitle number="3" title="LTAA Research Intelligence" />
-                            {ltaa && ltaa.status !== 'analyzing' ? (
+                            {ltaa && (ltaa.report || ltaa.ranked_targets || ltaa.stats || ltaa.disease || ltaa.domain) ? (
                                 <>
                                     {/* Domain & Disease */}
-                                    <Box sx={{ display: 'flex', gap: 1, mb: 2, flexWrap: 'wrap' }}>
-                                        {ltaa.disease && <Chip label={`Disease: ${ltaa.disease}`} size="small" sx={{ fontWeight: 600, bgcolor: '#ecfdf5', color: '#065f46' }} />}
-                                        {ltaa.domain && <Chip label={`Domain: ${ltaa.domain}`} size="small" sx={{ fontWeight: 600, bgcolor: '#eff6ff', color: '#1e40af' }} />}
-                                    </Box>
+                                    {(ltaa.disease || ltaa.domain) && (
+                                        <Box sx={{ display: 'flex', gap: 1, mb: 2, flexWrap: 'wrap' }}>
+                                            {ltaa.disease && <Chip label={`Disease: ${ltaa.disease}`} size="small" sx={{ fontWeight: 600, bgcolor: '#ecfdf5', color: '#065f46' }} />}
+                                            {ltaa.domain && <Chip label={`Domain: ${ltaa.domain}`} size="small" sx={{ fontWeight: 600, bgcolor: '#eff6ff', color: '#1e40af' }} />}
+                                        </Box>
+                                    )}
 
                                     {/* Scientific Summary */}
                                     {ltaa.report?.summary && (
@@ -304,9 +372,23 @@ const TrialReportModal = ({ open, onClose, formData, intelData, insilicoData, do
                                             {ltaa.stats.entities_extracted != null && <Chip label={`Entities Extracted: ${ltaa.stats.entities_extracted}`} size="small" variant="outlined" />}
                                         </Box>
                                     )}
+
+                                    {/* Show partial data message if incomplete */}
+                                    {!ltaa.report?.summary && !ltaa.ranked_targets?.length && (
+                                        <Paper elevation={0} sx={{ p: 2, bgcolor: '#fffbeb', border: '1px solid #fde68a', borderRadius: 2, mt: 2 }}>
+                                            <Typography variant="body2" sx={{ color: '#92400e', fontWeight: 600 }}>
+                                                ⚠️ LTAA analysis is incomplete or still processing. Available data is shown above.
+                                            </Typography>
+                                        </Paper>
+                                    )}
                                 </>
                             ) : ltaa?.status === 'analyzing' ? (
-                                <NotAvailable label="LTAA research intelligence is still being analyzed. Please check back later." />
+                                <Paper elevation={0} sx={{ p: 3, bgcolor: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: 2, textAlign: 'center' }}>
+                                    <Typography variant="body2" sx={{ color: '#1e40af', fontWeight: 600 }}>🔄 Analysis in Progress</Typography>
+                                    <Typography variant="body2" color="text.secondary">
+                                        LTAA research intelligence is currently being analyzed. This process may take several minutes. Please check back later for complete results.
+                                    </Typography>
+                                </Paper>
                             ) : (
                                 <NotAvailable label="LTAA Research Intelligence" />
                             )}
@@ -315,7 +397,7 @@ const TrialReportModal = ({ open, onClose, formData, intelData, insilicoData, do
                         {/* ── Section 4: In Silico Drug Modeling ── */}
                         <Box className="report-section report-page-break">
                             <SectionTitle number="4" title="In Silico Drug Modeling" />
-                            {insilico && !insilico.error ? (
+                            {insilico && (insilico.target_analysis || insilico.drugs || insilico.interactions || insilico.simulation) && !insilico.error ? (
                                 <>
                                     {/* Target Analysis */}
                                     {insilico.target_analysis?.targets?.length > 0 && (
@@ -444,7 +526,23 @@ const TrialReportModal = ({ open, onClose, formData, intelData, insilicoData, do
                                             </TableContainer>
                                         </Box>
                                     )}
+
+                                    {/* Show partial data message if incomplete */}
+                                    {!insilico.drugs?.length && !insilico.target_analysis && !insilico.simulation && (
+                                        <Paper elevation={0} sx={{ p: 2, bgcolor: '#fffbeb', border: '1px solid #fde68a', borderRadius: 2, mt: 2 }}>
+                                            <Typography variant="body2" sx={{ color: '#92400e', fontWeight: 600 }}>
+                                                ⚠️ In Silico analysis is incomplete or still processing. Available data is shown above.
+                                            </Typography>
+                                        </Paper>
+                                    )}
                                 </>
+                            ) : insilico?.error ? (
+                                <Paper elevation={0} sx={{ p: 3, bgcolor: '#fee2e2', border: '1px solid #fecaca', borderRadius: 2, textAlign: 'center' }}>
+                                    <Typography variant="body2" sx={{ color: '#991b1b', fontWeight: 600 }}>❌ Analysis Error</Typography>
+                                    <Typography variant="body2" color="text.secondary">
+                                        {insilico.error || 'An error occurred during In Silico drug modeling analysis.'}
+                                    </Typography>
+                                </Paper>
                             ) : (
                                 <NotAvailable label="In Silico Drug Modeling" />
                             )}

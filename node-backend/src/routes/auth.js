@@ -53,7 +53,7 @@ router.post('/login', async (req, res, next) => {
                 userId: user.id,
                 username: user.username,
                 organizationId: user.organizationId,
-                organizationName: user.organization.name,
+                organizationName: user.organization?.name || null,
                 role: user.role
             },
             JWT_SECRET,
@@ -68,11 +68,11 @@ router.post('/login', async (req, res, next) => {
                 email: user.email,
                 fullName: user.fullName,
                 role: user.role,
-                organization: {
+                organization: user.organization ? {
                     id: user.organization.id,
                     name: user.organization.name,
                     domain: user.organization.domain
-                }
+                } : null
             }
         });
 
@@ -115,11 +115,11 @@ router.get('/me', async (req, res, next) => {
                 email: user.email,
                 fullName: user.fullName,
                 role: user.role,
-                organization: {
+                organization: user.organization ? {
                     id: user.organization.id,
                     name: user.organization.name,
                     domain: user.organization.domain
-                }
+                } : null
             }
         });
 

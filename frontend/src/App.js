@@ -10,7 +10,7 @@ import {
 import {
     Container, AppBar, Toolbar, Typography, Box, Button, CssBaseline, Menu, MenuItem, Avatar
 } from '@mui/material';
-import { Home, Psychology, Security, AdminPanelSettings, Science, Dashboard, ExitToApp, Business } from '@mui/icons-material';
+import { Home, Psychology, Security, AdminPanelSettings, Science, Dashboard, ExitToApp, Business, Assignment as AssignmentIcon } from '@mui/icons-material';
 
 import WorkflowStepper from './components/WorkflowStepper';
 import ProtectedRoute from './components/ProtectedRoute';
@@ -22,6 +22,9 @@ import ScreeningPage from './pages/ScreeningPage';
 import AuditTrailPage from './pages/AuditTrailPage';
 import PrivacyAuditPage from './pages/PrivacyAuditPage';
 import OrganizationDashboard from './pages/OrganizationDashboard';
+import PIPage from './pages/PIPage';
+import PISubmissionDetail from './pages/PISubmissionDetail';
+import TrialDetailPage from './pages/TrialDetailPage';
 
 function App() {
     const [currentTrial, setCurrentTrial] = useState(null);
@@ -30,9 +33,9 @@ function App() {
         <Router basename="/drugtrial" future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
             <CssBaseline />
             <Routes>
-                {/* Public route */}
+                {/* Public routes */}
                 <Route path="/login" element={<LoginPage />} />
-                
+
                 {/* Protected routes */}
                 <Route path="/*" element={
                     <ProtectedRoute>
@@ -45,6 +48,17 @@ function App() {
 }
 
 function MainLayout({ currentTrial, setCurrentTrial }) {
+    const user = JSON.parse(localStorage.getItem('user') || '{}');
+
+    // Render different layout based on user role
+    if (user.role === 'PRINCIPAL_INVESTIGATOR') {
+        return <PILayout />;
+    }
+
+    return <OrganizationLayout currentTrial={currentTrial} setCurrentTrial={setCurrentTrial} />;
+}
+
+function OrganizationLayout({ currentTrial, setCurrentTrial }) {
     const navigate = useNavigate();
     const [anchorEl, setAnchorEl] = useState(null);
     const user = JSON.parse(localStorage.getItem('user') || '{}');
@@ -73,14 +87,14 @@ function MainLayout({ currentTrial, setCurrentTrial }) {
                     <Button color="inherit" component={Link} to="/dashboard" startIcon={<Dashboard />}>
                         Dashboard
                     </Button>
+                    <Button color="inherit" component={Link} to="/" startIcon={<Home />}>
+                        Upload Protocol
+                    </Button>
                     <Button color="inherit" component={Link} to="/audit" startIcon={<Security />}>
                         Audit Trail
                     </Button>
                     <Button color="inherit" component={Link} to="/privacy" startIcon={<AdminPanelSettings />}>
                         Privacy Audit
-                    </Button>
-                    <Button color="inherit" component={Link} to="/" startIcon={<Home />}>
-                        Home
                     </Button>
                     <Button
                         color="inherit"
@@ -96,10 +110,12 @@ function MainLayout({ currentTrial, setCurrentTrial }) {
                         open={Boolean(anchorEl)}
                         onClose={handleMenuClose}
                     >
-                        <MenuItem disabled>
-                            <Business sx={{ mr: 1 }} fontSize="small" />
-                            {user.organization?.name}
-                        </MenuItem>
+                        {user.organization && (
+                            <MenuItem disabled>
+                                <Business sx={{ mr: 1 }} fontSize="small" />
+                                {user.organization?.name}
+                            </MenuItem>
+                        )}
                         <MenuItem disabled>
                             Logged in as: {user.fullName || user.username}
                         </MenuItem>
@@ -115,8 +131,10 @@ function MainLayout({ currentTrial, setCurrentTrial }) {
                 <WorkflowHeader />
 
                 <Routes>
+                    {/* Organization Routes */}
                     <Route path="/" element={<UploadPage onUploadSuccess={setCurrentTrial} />} />
                     <Route path="/dashboard" element={<OrganizationDashboard />} />
+                    <Route path="/trial/:trialId/details" element={<TrialDetailPage />} />
                     <Route path="/api/fda/forms/:documentId" element={<FDAProcessingPage />} />
                     <Route path="/process-fda/:documentId" element={<FDAProcessingPage />} />
                     <Route path="/trial/:trialId/criteria" element={<CriteriaPage trialData={currentTrial} />} />
@@ -124,6 +142,78 @@ function MainLayout({ currentTrial, setCurrentTrial }) {
                     <Route path="/fda-processing" element={<FDAProcessingPage />} />
                     <Route path="/audit" element={<AuditTrailPage />} />
                     <Route path="/privacy" element={<PrivacyAuditPage />} />
+
+
+                </Routes>
+            </Container>
+        </Box>
+    );
+}
+
+function PILayout() {
+    const navigate = useNavigate();
+    const [anchorEl, setAnchorEl] = useState(null);
+    const user = JSON.parse(localStorage.getItem('user') || '{}');
+
+    const handleMenuClick = (event) => {
+        setAnchorEl(event.currentTarget);
+    };
+
+    const handleMenuClose = () => {
+        setAnchorEl(null);
+    };
+
+    const handleLogout = () => {
+        localStorage.removeItem('auth_token');
+        localStorage.removeItem('user');
+        navigate('/login');
+    };
+
+    return (
+        <Box sx={{ flexGrow: 1, bgcolor: '#f5f7fa', minHeight: '100vh' }}>
+            <AppBar position="static" elevation={0} sx={{ bgcolor: '#2c5282' }}>
+                <Toolbar>
+                    <Science sx={{ mr: 2, fontSize: 32 }} />
+                    <Typography variant="h6" component="div" sx={{ flexGrow: 1, fontWeight: 600 }}>
+                        Principal Investigator Portal
+                    </Typography>
+                    <Button color="inherit" component={Link} to="/" startIcon={<AssignmentIcon />} sx={{ fontWeight: 600 }}>
+                        Submissions Dashboard
+                    </Button>
+                    <Button
+                        color="inherit"
+                        onClick={handleMenuClick}
+                        startIcon={<Avatar sx={{ width: 24, height: 24, bgcolor: 'rgba(255,255,255,0.2)', fontSize: 14 }}>
+                            {user.fullName?.charAt(0) || 'P'}
+                        </Avatar>}
+                    >
+                        {user.fullName || user.username}
+                    </Button>
+                    <Menu
+                        anchorEl={anchorEl}
+                        open={Boolean(anchorEl)}
+                        onClose={handleMenuClose}
+                    >
+                        <MenuItem disabled>
+                            <Science sx={{ mr: 1 }} fontSize="small" />
+                            Principal Investigator
+                        </MenuItem>
+                        <MenuItem disabled>
+                            {user.fullName || user.username}
+                        </MenuItem>
+                        <MenuItem onClick={handleLogout}>
+                            <ExitToApp sx={{ mr: 1 }} fontSize="small" />
+                            Logout
+                        </MenuItem>
+                    </Menu>
+                </Toolbar>
+            </AppBar>
+
+            <Container maxWidth="xl" sx={{ mt: 4, mb: 4 }}>
+                <Routes>
+                    <Route path="/" element={<PIPage />} />
+                    <Route path="/submissions/:id" element={<PISubmissionDetail />} />
+                    <Route path="*" element={<PIPage />} />
                 </Routes>
             </Container>
         </Box>
@@ -132,6 +222,19 @@ function MainLayout({ currentTrial, setCurrentTrial }) {
 
 const WorkflowHeader = () => {
     const location = useLocation();
+
+    // Only show stepper on workflow pages
+    const isWorkflowPage = location.pathname === '/' ||
+        location.pathname.includes('/api/fda/forms/') ||
+        location.pathname.includes('/process-fda/') ||
+        location.pathname.includes('/forms') ||
+        location.pathname.includes('/criteria') ||
+        location.pathname.includes('/screening');
+
+    if (!isWorkflowPage) {
+        return null;
+    }
+
     const getStep = () => {
         if (location.pathname === '/') return 0;
         if (location.pathname.includes('/api/fda/forms/')) return 1;

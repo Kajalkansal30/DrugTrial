@@ -66,7 +66,7 @@ function LoginPage() {
                     elevation={24}
                     sx={{
                         p: 4,
-                       borderRadius: 3
+                        borderRadius: 3
                     }}
                 >
                     <Box sx={{ textAlign: 'center', mb: 4 }}>
@@ -162,6 +162,9 @@ function LoginPage() {
                         </Typography>
                         <Typography variant="caption" display="block" color="text.secondary" sx={{ mt: 1 }}>
                             Other users: user@veersa, admin@dndi, user@clintech
+                        </Typography>
+                        <Typography variant="caption" display="block" color="text.secondary" sx={{ mt: 1 }}>
+                            PI accounts: pi_dr_smith, pi_dr_jones, pi_dr_williams
                         </Typography>
                     </Box>
                 </Paper>

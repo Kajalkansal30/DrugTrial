@@ -17,9 +17,9 @@ router.post('/check', authMiddleware, async (req, res, next) => {
             ...req.body,
             organization_id: req.user.organizationId
         };
-        
+
         const response = await pythonClient.post('/api/eligibility/check', bodyWithOrg);
-        
+
         // Create organization-scoped audit log
         try {
             await prisma.auditLog.create({
@@ -40,7 +40,7 @@ router.post('/check', authMiddleware, async (req, res, next) => {
         } catch (auditErr) {
             console.warn('⚠️  Failed to create audit log:', auditErr.message);
         }
-        
+
         res.json(response.data);
     } catch (error) {
         next(error);
@@ -58,9 +58,9 @@ router.post('/batch-check', authMiddleware, async (req, res, next) => {
             ...req.body,
             organization_id: req.user.organizationId
         };
-        
+
         const response = await pythonClient.post('/api/eligibility/batch-check', bodyWithOrg);
-        
+
         // Create organization-scoped audit log
         try {
             await prisma.auditLog.create({
@@ -81,7 +81,7 @@ router.post('/batch-check', authMiddleware, async (req, res, next) => {
         } catch (auditErr) {
             console.warn('⚠️  Failed to create audit log:', auditErr.message);
         }
-        
+
         res.json(response.data);
     } catch (error) {
         next(error);
@@ -95,7 +95,9 @@ router.post('/batch-check', authMiddleware, async (req, res, next) => {
 router.get('/results/:trialId', authMiddleware, async (req, res, next) => {
     try {
         const { trialId } = req.params;
-        
+
+        console.log('[Eligibility] Looking for trial:', trialId, 'for org:', req.user.organizationId);
+
         // trialId could be either the string trial_id or numeric id
         // Try to find by trialId (string) first
         let trial = await prisma.clinicalTrial.findFirst({
@@ -104,7 +106,7 @@ router.get('/results/:trialId', authMiddleware, async (req, res, next) => {
                 organizationId: req.user.organizationId
             }
         });
-        
+
         // If not found and trialId is numeric, try by id
         if (!trial && !isNaN(trialId)) {
             trial = await prisma.clinicalTrial.findFirst({
@@ -114,15 +116,33 @@ router.get('/results/:trialId', authMiddleware, async (req, res, next) => {
                 }
             });
         }
-        
+
         if (!trial) {
-            return res.status(404).json({ error: 'Trial not found or access denied' });
+            console.log('[Eligibility] Trial not found:', trialId);
+            return res.status(404).json({
+                error: 'Trial not found or access denied',
+                details: `Trial ${trialId} not found for organization ${req.user.organizationId}`
+            });
         }
-        
+
+        console.log('[Eligibility] Found trial:', trial.id, trial.trialId);
+
         // Forward to Python backend using the database ID
-        const response = await pythonClient.get(`/api/eligibility/results/${trial.id}`);
-        res.json(response.data);
+        try {
+            const response = await pythonClient.get(`/api/eligibility/results/${trial.id}`);
+            res.json(response.data);
+        } catch (apiError) {
+            // If Python backend returns 404, it means screening hasn't been run yet
+            // Return empty results instead of error to allow graceful handling
+            if (apiError.response?.status === 404) {
+                console.log('[Eligibility] No screening results found for trial:', trial.id, '(not run yet)');
+                return res.json({ results: [], message: 'No eligibility screening results available' });
+            }
+            // For other errors, throw to error handler
+            throw apiError;
+        }
     } catch (error) {
+        console.error('[Eligibility] Error:', error.message);
         next(error);
     }
 });

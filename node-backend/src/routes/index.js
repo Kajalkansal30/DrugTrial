@@ -14,6 +14,9 @@ const insilicoRouter = require('./insilico');
 const privacyRouter = require('./privacy');
 const auditRouter = require('./audit');
 const chatRouter = require('./chat');
+const submissionsRouter = require('./submissions');
+const piRouter = require('./pi');
+const patientAnalysisRouter = require('./patient-analysis');
 
 /**
  * Root endpoint - API information
@@ -62,9 +65,23 @@ router.get('/health', async (req, res, next) => {
  */
 router.get('/stats', async (req, res, next) => {
     try {
-        // Get basic stats from Python backend
-        const response = await pythonClient.get('/api/stats');
-        
+        let statsData = null;
+
+        // Try to get stats from Python backend
+        try {
+            const response = await pythonClient.get('/api/stats');
+            statsData = response.data;
+        } catch (pythonError) {
+            // Python backend unavailable - return fallback stats
+            console.log('[Stats] Python backend temporarily unavailable, using fallback data');
+            statsData = {
+                total_trials: 0,
+                total_patients: 0,
+                screening_runs: 0,
+                eligible_rate: 0
+            };
+        }
+
         // If user is authenticated, add organization-specific stats
         const token = req.headers.authorization?.replace('Bearer ', '');
         if (token) {
@@ -72,22 +89,22 @@ router.get('/stats', async (req, res, next) => {
                 const jwt = require('jsonwebtoken');
                 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-this-in-production';
                 const decoded = jwt.verify(token, JWT_SECRET);
-                
+
                 const { PrismaClient } = require('@prisma/client');
                 const prisma = new PrismaClient();
-                
+
                 // Count organization-specific data
                 const orgTrials = await prisma.clinicalTrial.count({
                     where: { organizationId: decoded.organizationId }
                 });
-                
-                response.data.organization_trials = orgTrials;
+
+                statsData.organization_trials = orgTrials;
             } catch (err) {
                 // Continue without org stats if auth fails
             }
         }
-        
-        res.json(response.data);
+
+        res.json(statsData);
     } catch (error) {
         next(error);
     }
@@ -104,5 +121,8 @@ router.use('/insilico', insilicoRouter);
 router.use('/privacy', privacyRouter);
 router.use('/audit', auditRouter);
 router.use('/chat', chatRouter);
+router.use('/submissions', submissionsRouter);
+router.use('/pi', piRouter);
+router.use('/patient-analysis', patientAnalysisRouter);
 
 module.exports = router;

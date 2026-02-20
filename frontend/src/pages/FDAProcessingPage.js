@@ -167,6 +167,28 @@ function FDAProcessingPage() {
                 }
             }
 
+            // If trial exists, load complete trial data including InSilico and Research Intelligence
+            if (docData.trial?.trial_id) {
+                try {
+                    const completeDataRes = await apiClient.get(`/api/trials/${docData.trial.trial_id}/complete-data`);
+                    const completeData = completeDataRes.data;
+
+                    // Merge complete data into docData
+                    if (completeData.fdaForms?.forms) {
+                        docData.fda_1571 = completeData.fdaForms.forms['1571'] || docData.fda_1571;
+                        docData.fda_1572 = completeData.fdaForms.forms['1572'] || docData.fda_1572;
+                    }
+
+                    // Add InSilico and Research Intelligence to docData for use in FormViewer
+                    docData.savedInsilicoData = completeData.insilicoData;
+                    docData.savedIntelData = completeData.researchIntelligence;
+
+                    console.log('Loaded complete trial data including InSilico and Research Intelligence');
+                } catch (completeErr) {
+                    console.warn('Could not load complete trial data:', completeErr.message);
+                }
+            }
+
             setSelectedDocument(docData);
             setShowFormViewer(true);
         } catch (error) {
@@ -371,23 +393,20 @@ function FDAFormViewer({ document, onClose, isWizard, onContinue, continuing }) 
         1571: document.fda_1571,
         1572: document.fda_1572,
     });
-    const [showSignModal, setShowSignModal] = useState(false);
     const [saving, setSaving] = useState(false);
     // Refresh status from props if possible, or track locally?
     // Using simple local tracking for immediate UI updates
     const [localStatus, setLocalStatus] = useState(document.document.status);
     const [localSignedBy, setLocalSignedBy] = useState(document.document.signed_by);
     const [localReviewedBy, setLocalReviewedBy] = useState(document.document.reviewed_by);
-    const [intelData, setIntelData] = useState(null);
+    const [intelData, setIntelData] = useState(document.savedIntelData || null);
     const [loadingIntel, setLoadingIntel] = useState(false);
-    const [insilicoData, setInsilicoData] = useState(null);
+    const [insilicoData, setInsilicoData] = useState(document.savedInsilicoData || null);
     const [reportOpen, setReportOpen] = useState(false);
 
     const isEditable = localStatus === 'extracted';
     // Allow re-review if needed? Usually only if extracted.
     const isReviewable = localStatus === 'extracted';
-    const isSignable = localStatus === 'reviewed';
-    const isSigned = localStatus === 'signed';
 
     const handleFieldChange = (formType, field, value) => {
         setFormData({
@@ -409,6 +428,47 @@ function FDAFormViewer({ document, onClose, isWizard, onContinue, continuing }) 
             alert('Changes saved successfully');
         } catch (error) {
             alert('Save failed: ' + (error.response?.data?.detail || error.message));
+        } finally {
+            setSaving(false);
+        }
+    };
+
+    // Comprehensive save - saves all data to database
+    const handleSaveAllData = async () => {
+        setSaving(true);
+        try {
+            const trialId = document.trial?.trial_id;
+            if (!trialId) {
+                alert('Trial ID not found. Please ensure the protocol was uploaded correctly.');
+                return;
+            }
+
+            const payload = {
+                documentId: document.document.id,
+                fdaForms: {
+                    '1571': formData['1571'],
+                    '1572': formData['1572']
+                },
+                insilicoData: insilicoData,
+                researchIntelData: intelData
+            };
+
+            console.log('Saving all trial data:', payload);
+
+            const response = await apiClient.post(`/api/trials/${trialId}/save-all-data`, payload);
+
+            if (response.data.success) {
+                const savedItems = response.data.savedItems || [];
+                const itemsList = savedItems.map(item => item.type).join(', ');
+                alert(`✅ All trial data saved successfully!\n\nSaved: ${itemsList}`);
+                console.log('Saved items:', savedItems);
+            } else {
+                alert('Data saved but response was unexpected');
+            }
+        } catch (error) {
+            console.error('Comprehensive save failed:', error);
+            const errorMsg = error.response?.data?.error || error.message || 'Unknown error';
+            alert(`Failed to save all data: ${errorMsg}`);
         } finally {
             setSaving(false);
         }
@@ -465,18 +525,6 @@ function FDAFormViewer({ document, onClose, isWizard, onContinue, continuing }) 
         }, 10000);
         return () => clearInterval(interval);
     }, [intelData?.status, activeTab]);
-
-    const handleSign = async (signatureData) => {
-        try {
-            await apiClient.post(`/api/fda/forms/${document.document.id}/sign`, signatureData);
-            alert('Document signed successfully');
-            setShowSignModal(false);
-            setLocalStatus('signed');
-            setLocalSignedBy(signatureData.signer_name);
-        } catch (error) {
-            alert('Signing failed: ' + (error.response?.data?.detail || error.message));
-        }
-    };
 
     // In Wizard Mode, we want to allow continue IF signed (or reviewed?)
     // User requested "only review and sign and move to next page"
@@ -764,54 +812,54 @@ function FDAFormViewer({ document, onClose, isWizard, onContinue, continuing }) 
                                             {(intelData.ranked_targets || intelData.targets || []).slice(0, 10).map((t, idx) => {
                                                 const refs = t.evidence || t.citations || [];
                                                 return (
-                                                <tr key={idx}>
-                                                    <td className="target-name">
-                                                        <div style={{ fontWeight: 'bold' }}>{t.name}</div>
-                                                        {t.validation_source && (
-                                                            <div style={{ fontSize: '0.75rem', color: '#666' }}>
-                                                                {t.validation_source}: {t.validation_id || 'N/A'}
+                                                    <tr key={idx}>
+                                                        <td className="target-name">
+                                                            <div style={{ fontWeight: 'bold' }}>{t.name}</div>
+                                                            {t.validation_source && (
+                                                                <div style={{ fontSize: '0.75rem', color: '#666' }}>
+                                                                    {t.validation_source}: {t.validation_id || 'N/A'}
+                                                                </div>
+                                                            )}
+                                                        </td>
+                                                        <td>
+                                                            <span className={`type-tag ${t.type?.toLowerCase().replace(/\//g, '')}`}>
+                                                                {t.type}
+                                                            </span>
+                                                        </td>
+                                                        <td style={{ textAlign: 'center' }}>
+                                                            <Chip
+                                                                label={`${t.mentions || refs.length} sources`}
+                                                                size="small"
+                                                                color="primary"
+                                                                variant="outlined"
+                                                                sx={{ fontWeight: 600, height: 24, fontSize: '0.75rem' }}
+                                                            />
+                                                        </td>
+                                                        <td className="score-cell">
+                                                            <div style={{ display: 'flex', alignItems: 'center' }}>
+                                                                <span style={{ marginRight: '8px', fontWeight: 600 }}>{Number(t.score).toFixed(1)}</span>
+                                                                <div style={{ width: '50px', height: '6px', background: '#eee', borderRadius: '3px' }}>
+                                                                    <div style={{ width: `${Math.min(t.score * 10, 100)}%`, height: '100%', background: '#1976d2', borderRadius: '3px' }}></div>
+                                                                </div>
                                                             </div>
-                                                        )}
-                                                    </td>
-                                                    <td>
-                                                        <span className={`type-tag ${t.type?.toLowerCase().replace(/\//g, '')}`}>
-                                                            {t.type}
-                                                        </span>
-                                                    </td>
-                                                    <td style={{ textAlign: 'center' }}>
-                                                        <Chip
-                                                            label={`${t.mentions || refs.length} sources`}
-                                                            size="small"
-                                                            color="primary"
-                                                            variant="outlined"
-                                                            sx={{ fontWeight: 600, height: 24, fontSize: '0.75rem' }}
-                                                        />
-                                                    </td>
-                                                    <td className="score-cell">
-                                                        <div style={{ display: 'flex', alignItems: 'center' }}>
-                                                            <span style={{ marginRight: '8px', fontWeight: 600 }}>{Number(t.score).toFixed(1)}</span>
-                                                            <div style={{ width: '50px', height: '6px', background: '#eee', borderRadius: '3px' }}>
-                                                                <div style={{ width: `${Math.min(t.score * 10, 100)}%`, height: '100%', background: '#1976d2', borderRadius: '3px' }}></div>
-                                                            </div>
-                                                        </div>
-                                                    </td>
-                                                    <td className="citation-cell">
-                                                        {refs.slice(0, 2).map((c, cidx) => {
-                                                            const src = c.source || '';
-                                                            const text = c.snippet || c.context || '';
-                                                            return (
-                                                            <div key={cidx} className="citation-snippet">
-                                                                <small>
-                                                                    {src.startsWith('http') ? 'PubMed' : src}
-                                                                    {c.page > 0 && ` (Page ${c.page})`}
-                                                                </small>
-                                                                {text && <p style={{ margin: '2px 0', fontSize: '0.75rem', color: '#555' }}>"{text.substring(0, 100)}..."</p>}
-                                                            </div>
-                                                            );
-                                                        })}
-                                                        {refs.length === 0 && <small style={{ color: '#999' }}>No citations</small>}
-                                                    </td>
-                                                </tr>
+                                                        </td>
+                                                        <td className="citation-cell">
+                                                            {refs.slice(0, 2).map((c, cidx) => {
+                                                                const src = c.source || '';
+                                                                const text = c.snippet || c.context || '';
+                                                                return (
+                                                                    <div key={cidx} className="citation-snippet">
+                                                                        <small>
+                                                                            {src.startsWith('http') ? 'PubMed' : src}
+                                                                            {c.page > 0 && ` (Page ${c.page})`}
+                                                                        </small>
+                                                                        {text && <p style={{ margin: '2px 0', fontSize: '0.75rem', color: '#555' }}>"{text.substring(0, 100)}..."</p>}
+                                                                    </div>
+                                                                );
+                                                            })}
+                                                            {refs.length === 0 && <small style={{ color: '#999' }}>No citations</small>}
+                                                        </td>
+                                                    </tr>
                                                 );
                                             })}
                                             {(intelData.ranked_targets || intelData.targets || []).length === 0 && (
@@ -868,17 +916,55 @@ function FDAFormViewer({ document, onClose, isWizard, onContinue, continuing }) 
                 {isEditable && (
                     <>
                         <button onClick={handleSave} disabled={saving} className="save-button">
-                            {saving ? 'Saving...' : 'Save Changes'}
+                            {saving ? 'Saving...' : 'Save Current Tab'}
                         </button>
+                        <button
+                            onClick={handleSaveAllData}
+                            disabled={saving}
+                            className="save-button"
+                            style={{
+                                backgroundColor: '#1976d2',
+                                fontWeight: 'bold'
+                            }}
+                            title="Save all extracted data (FDA forms, InSilico, Research Intelligence) to database"
+                        >
+                            {saving ? 'Saving All Data...' : '💾 Save All Data to Database'}
+                        </button>
+                        {(document.savedInsilicoData || document.savedIntelData) && (
+                            <span style={{
+                                color: '#4caf50',
+                                fontSize: '12px',
+                                marginLeft: '10px',
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                gap: '4px'
+                            }}>
+                                ✓ Previously saved data loaded
+                            </span>
+                        )}
                         <button onClick={handleReview} className="review-button">
                             Mark as Reviewed
                         </button>
+
+                        {/* Download buttons */}
+                        <button
+                            onClick={() => window.open(`${API_BASE}/api/fda/documents/${document.document.id}/download`, '_blank')}
+                            className="action-button"
+                            style={{ marginLeft: 'auto' }}
+                            title="Download original FDA document PDF"
+                        >
+                            📥 Download FDA Document
+                        </button>
+                        {document.trial?.trial_id && (
+                            <button
+                                onClick={() => window.open(`${API_BASE}/api/trials/${document.trial.trial_id}/protocol/download`, '_blank')}
+                                className="action-button"
+                                title="Download protocol PDF"
+                            >
+                                📥 Download Protocol
+                            </button>
+                        )}
                     </>
-                )}
-                {isSignable && (
-                    <button onClick={() => setShowSignModal(true)} className="sign-button">
-                        Sign Form
-                    </button>
                 )}
 
                 {/* Wizard Continue Button */}
@@ -907,13 +993,6 @@ function FDAFormViewer({ document, onClose, isWizard, onContinue, continuing }) 
                 )}
             </div>
 
-            {showSignModal && (
-                <SignatureModal
-                    onSign={handleSign}
-                    onCancel={() => setShowSignModal(false)}
-                />
-            )}
-
             <TrialReportModal
                 open={reportOpen}
                 onClose={() => setReportOpen(false)}
@@ -922,75 +1001,6 @@ function FDAFormViewer({ document, onClose, isWizard, onContinue, continuing }) 
                 insilicoData={insilicoData}
                 documentInfo={document}
             />
-        </div>
-    );
-}
-
-// Signature Modal Component
-function SignatureModal({ onSign, onCancel }) {
-    const [signerName, setSignerName] = useState('');
-    const [signerRole, setSignerRole] = useState('');
-    const [agreed, setAgreed] = useState(false);
-
-    const handleSubmit = () => {
-        if (!signerName || !signerRole || !agreed) {
-            alert('Please fill all fields and agree to the certification');
-            return;
-        }
-
-        onSign({
-            signer_name: signerName,
-            signer_role: signerRole,
-        });
-    };
-
-    return (
-        <div className="modal-overlay">
-            <div className="modal-content">
-                <h3>E-Signature</h3>
-                <p className="warning">⚠️ Once signed, this form cannot be edited</p>
-
-                <div className="form-field">
-                    <label>Your Name *</label>
-                    <input
-                        type="text"
-                        value={signerName}
-                        onChange={(e) => setSignerName(e.target.value)}
-                        placeholder="Enter your full name"
-                    />
-                </div>
-
-                <div className="form-field">
-                    <label>Your Role/Title *</label>
-                    <input
-                        type="text"
-                        value={signerRole}
-                        onChange={(e) => setSignerRole(e.target.value)}
-                        placeholder="e.g., Principal Investigator"
-                    />
-                </div>
-
-                <div className="checkbox-field">
-                    <input
-                        type="checkbox"
-                        checked={agreed}
-                        onChange={(e) => setAgreed(e.target.checked)}
-                        id="agree-checkbox"
-                    />
-                    <label htmlFor="agree-checkbox">
-                        I certify that the information in this form is accurate and complete
-                    </label>
-                </div>
-
-                <div className="modal-actions">
-                    <button onClick={handleSubmit} className="sign-button" disabled={!agreed}>
-                        Sign Document
-                    </button>
-                    <button onClick={onCancel} className="cancel-button">
-                        Cancel
-                    </button>
-                </div>
-            </div>
         </div>
     );
 }

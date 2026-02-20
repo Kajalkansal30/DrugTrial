@@ -13,15 +13,15 @@ const prisma = new PrismaClient();
 router.get('/logs', authMiddleware, async (req, res, next) => {
     try {
         const { agent, action, limit = 100 } = req.query;
-        
+
         // Build where clause with organization filter
         const where = {
             organizationId: req.user.organizationId
         };
-        
+
         if (agent) where.agent = agent;
         if (action) where.action = action;
-        
+
         // Fetch audit logs from database filtered by organization
         const logs = await prisma.auditLog.findMany({
             where,
@@ -41,9 +41,9 @@ router.get('/logs', authMiddleware, async (req, res, next) => {
                 entryHash: true
             }
         });
-        
+
         console.log(`📋 Retrieved ${logs.length} audit logs for organization ${req.user.organizationId}`);
-        
+
         res.json(logs);
     } catch (error) {
         console.error('❌ Error fetching audit logs:', error.message);
@@ -69,7 +69,7 @@ router.get('/verify-integrity', authMiddleware, async (req, res, next) => {
                 timestamp: true
             }
         });
-        
+
         if (logs.length === 0) {
             return res.json({
                 status: 'valid',
@@ -77,15 +77,15 @@ router.get('/verify-integrity', authMiddleware, async (req, res, next) => {
                 total_logs: 0
             });
         }
-        
+
         // Verify hash chain integrity
         let isValid = true;
         const issues = [];
-        
+
         for (let i = 1; i < logs.length; i++) {
             const currentLog = logs[i];
             const previousLog = logs[i - 1];
-            
+
             if (currentLog.previousHash !== previousLog.entryHash) {
                 isValid = false;
                 issues.push({
@@ -96,15 +96,15 @@ router.get('/verify-integrity', authMiddleware, async (req, res, next) => {
                 });
             }
         }
-        
+
         console.log(`🔒 Verified ${logs.length} audit logs for organization ${req.user.organizationId}: ${isValid ? 'Valid' : 'Invalid'}`);
-        
+
         res.json({
             status: isValid ? 'valid' : 'invalid',
             total_logs: logs.length,
             issues: issues.length > 0 ? issues : undefined,
-            message: isValid 
-                ? 'All audit logs have valid hash chains' 
+            message: isValid
+                ? 'All audit logs have valid hash chains'
                 : `Found ${issues.length} integrity issues`
         });
     } catch (error) {
