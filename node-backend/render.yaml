@@ -1,0 +1,27 @@
+services:
+  - type: web
+    name: drugtrial-node-backend
+    runtime: node
+    env: node
+    plan: free  # Change to 'starter' or higher for production
+    buildCommand: npm install && npx prisma generate
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 4000
+      - key: PYTHON_BACKEND_URL
+        value: https://ai.veersalabs.com/drugtrial-be
+      - key: CORS_ORIGINS
+        value: https://ai.veersalabs.com,https://ai.veersalabs.com/drugtrial
+      - key: DATABASE_URL
+        sync: false  # Set this in Render dashboard (from .env)
+      - key: RATE_LIMIT_WINDOW_MS
+        value: 900000
+      - key: RATE_LIMIT_MAX_REQUESTS
+        value: 100
+      - key: LOG_LEVEL
+        value: info
+    healthCheckPath: /api/health
+    autoDeploy: true

@@ -11,8 +11,8 @@ module.exports = {
 
     // CORS
     corsOrigins: process.env.CORS_ORIGINS
-        ? process.env.CORS_ORIGINS.split(',')
-        : ['http://localhost:3000', 'http://127.0.0.1:3000'],
+        ? process.env.CORS_ORIGINS.split(',').map(origin => origin.trim())
+        : [],
 
     // Rate Limiting
     rateLimitWindowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS) || 900000, // 15 minutes
