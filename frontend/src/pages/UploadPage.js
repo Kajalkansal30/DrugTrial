@@ -2,8 +2,9 @@ import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { Box, Typography, Button, Paper, Alert, CircularProgress, LinearProgress } from '@mui/material';
 import { CloudUpload } from '@mui/icons-material';
 import { useNavigate } from 'react-router-dom';
+import apiClient from '../utils/apiClient';
 
-const API_URL = process.env.REACT_APP_API_URL || '';
+const API_URL = import.meta.env.VITE_API_URL || '';
 
 const UploadPage = ({ onUploadSuccess }) => {
     const [file, setFile] = useState(null);
@@ -34,9 +35,8 @@ const UploadPage = ({ onUploadSuccess }) => {
         pollingRef.current = setInterval(async () => {
             attempts++;
             try {
-                const resp = await fetch(`${API_URL}/api/fda/status/${docId}`);
-                if (!resp.ok) return;
-                const data = await resp.json();
+                const resp = await apiClient.get(`/api/fda/status/${docId}`);
+                const data = resp.data;
 
                 setProgress(data.progress || 0);
 
@@ -101,17 +101,13 @@ const UploadPage = ({ onUploadSuccess }) => {
 
         try {
             addLog(`📤 Uploading ${file.name}...`);
-            const response = await fetch(`${API_URL}/api/fda/upload`, {
-                method: 'POST',
-                body: formData,
+            const response = await apiClient.post('/api/fda/upload', formData, {
+                headers: {
+                    'Content-Type': 'multipart/form-data'
+                }
             });
 
-            if (!response.ok) {
-                const errorText = await response.text();
-                throw new Error(`Upload failed: ${response.status} - ${errorText}`);
-            }
-
-            const data = await response.json();
+            const data = response.data;
 
             if (!data.document_id) {
                 throw new Error("No document_id returned from server");

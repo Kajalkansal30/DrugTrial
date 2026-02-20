@@ -32,7 +32,7 @@ import VerifiedUserIcon from '@mui/icons-material/VerifiedUser';
 import WarningIcon from '@mui/icons-material/Warning';
 import DomainVerificationIcon from '@mui/icons-material/DomainVerification';
 
-const API_URL = process.env.REACT_APP_API_URL || '';
+const API_URL = import.meta.env.VITE_API_URL || '';
 
 const LiteratureAnalysisPage = () => {
     const [query, setQuery] = useState('Chagas Disease');

@@ -1,0 +1,368 @@
+// This is your Prisma schema file
+// Learn more: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Organization {
+  id        Int      @id @default(autoincrement())
+  name      String   @unique
+  domain    String?
+  status    String   @default("active")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  users            User[]
+  clinicalTrials   ClinicalTrial[]
+  fdaDocuments     FDADocument[]
+  auditLogs        AuditLog[]
+
+  @@map("organizations")
+}
+
+enum UserRole {
+  ORGANIZATION_ADMIN
+  ORGANIZATION_USER
+  PRINCIPAL_INVESTIGATOR
+  SYSTEM_ADMIN
+}
+
+model User {
+  id             Int       @id @default(autoincrement())
+  username       String    @unique
+  passwordHash   String    @map("password_hash")
+  email          String?
+  fullName       String?   @map("full_name")
+  organizationId Int?      @map("organization_id")
+  role           UserRole  @default(ORGANIZATION_USER)
+  status         String    @default("active")
+  lastLogin      DateTime? @map("last_login")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+
+  organization          Organization?        @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  principalInvestigator PrincipalInvestigator?
+  submissionsCreated    TrialSubmission[]    @relation("SubmissionCreator")
+
+  @@index([username])
+  @@index([organizationId])
+  @@index([status])
+  @@index([role])
+  @@map("users")
+}
+
+// Extend existing tables with organization_id
+model ClinicalTrial {
+  id              Int      @id @default(autoincrement())
+  trialId         String   @unique @map("trial_id")
+  protocolTitle   String?  @map("protocol_title")
+  phase           String?
+  indication      String?
+  drugName        String?  @map("drug_name")
+  status          String?
+  documentId      Int?     @map("document_id")
+  protocolFilePath String? @map("protocol_file_path") @db.VarChar(500)
+  fda1571         Json?    @map("fda_1571")
+  fda1572         Json?    @map("fda_1572")
+  matchingConfig  Json?    @map("matching_config")
+  analysisResults Json?    @map("analysis_results")
+  analysisStatus  String?  @default("pending") @map("analysis_status")
+  organizationId  Int?     @map("organization_id")
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  organization         Organization?          @relation(fields: [organizationId], references: [id])
+  fdaDocument          FDADocument?           @relation(fields: [documentId], references: [id])
+  submissions          TrialSubmission[]
+  insilicoAnalysis     InSilicoAnalysis?
+  researchIntelligence ResearchIntelligence?
+
+  @@index([organizationId])
+  @@index([documentId])
+  @@map("clinical_trials")
+}
+
+// In-Silico Analysis Data (Drug predictions, DDI, Toxicity, etc.)
+model InSilicoAnalysis {
+  id                 Int      @id @default(autoincrement())
+  trialId            Int      @unique @map("trial_id")
+  drugName           String?  @map("drug_name") @db.VarChar(500)
+  drugStructure      String?  @map("drug_structure") @db.Text
+  molecularTargets   Json?    @map("molecular_targets") @db.JsonB
+  ddiPredictions     Json?    @map("ddi_predictions") @db.JsonB
+  toxicityPrediction Json?    @map("toxicity_prediction") @db.JsonB
+  pkpdSimulation     Json?    @map("pkpd_simulation") @db.JsonB
+  otherAnalyses      Json?    @map("other_analyses") @db.JsonB
+  analysisMetadata   Json?    @map("analysis_metadata") @db.JsonB
+  createdAt          DateTime @default(now()) @map("created_at")
+  updatedAt          DateTime @updatedAt @map("updated_at")
+
+  trial ClinicalTrial @relation(fields: [trialId], references: [id], onDelete: Cascade)
+
+  @@index([trialId])
+  @@map("insilico_analyses")
+}
+
+// Research Intelligence / Literature Analysis (LTAA)
+model ResearchIntelligence {
+  id               Int      @id @default(autoincrement())
+  trialId          Int      @unique @map("trial_id")
+  disease          String?  @db.VarChar(500)
+  targetGenes      Json?    @map("target_genes") @db.JsonB
+  biomarkers       Json?    @db.JsonB
+  pathways         Json?    @db.JsonB
+  publications     Json?    @db.JsonB
+  clinicalTrials   Json?    @map("clinical_trials") @db.JsonB
+  drugCandidates   Json?    @map("drug_candidates") @db.JsonB
+  analysisMetadata Json?    @map("analysis_metadata") @db.JsonB
+  createdAt        DateTime @default(now()) @map("created_at")
+  updatedAt        DateTime @updatedAt @map("updated_at")
+
+  trial ClinicalTrial @relation(fields: [trialId], references: [id], onDelete: Cascade)
+
+  @@index([trialId])
+  @@index([disease])
+  @@map("research_intelligence")
+}
+
+model FDADocument {
+  id             Int       @id @default(autoincrement())
+  filename       String
+  filePath       String?   @map("file_path") @db.VarChar(500)
+  fileHash       String    @map("file_hash")
+  uploadDate     DateTime  @default(now()) @map("upload_date")
+  status         String    @default("extracted")
+  processedAt    DateTime? @map("processed_at")
+  reviewedAt     DateTime? @map("reviewed_at")
+  reviewedBy     String?   @map("reviewed_by")
+  signedAt       DateTime? @map("signed_at")
+  signedBy       String?   @map("signed_by")
+  signatureData  String?   @map("signature_data")
+  organizationId Int?      @map("organization_id")
+
+  organization   Organization?   @relation(fields: [organizationId], references: [id])
+  clinicalTrials ClinicalTrial[]
+  fdaForm1571    FDAForm1571?
+  fdaForm1572    FDAForm1572?
+
+  @@index([organizationId])
+  @@map("fda_documents")
+}
+
+// FDA Form 1571 - Investigational New Drug Application
+model FDAForm1571 {
+  id                 Int       @id @default(autoincrement())
+  documentId         Int       @unique @map("document_id")
+  indNumber          String?   @map("ind_number") @db.VarChar(50)
+  drugName           String?   @map("drug_name") @db.VarChar(500)
+  indication         String?   @db.Text
+  studyPhase         String?   @map("study_phase") @db.VarChar(50)
+  protocolTitle      String?   @map("protocol_title") @db.Text
+  sponsorName        String?   @map("sponsor_name") @db.VarChar(500)
+  sponsorAddress     String?   @map("sponsor_address") @db.Text
+  contactPerson      String?   @map("contact_person") @db.VarChar(200)
+  contactPhone       String?   @map("contact_phone") @db.VarChar(50)
+  contactEmail       String?   @map("contact_email") @db.VarChar(200)
+  crossReferenceInds Json?     @map("cross_reference_inds") @db.JsonB
+  extractionMetadata Json?     @map("extraction_metadata") @db.JsonB
+  createdAt          DateTime  @default(now()) @map("created_at")
+  updatedAt          DateTime  @updatedAt @map("updated_at")
+
+  document FDADocument @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@index([documentId])
+  @@map("fda_form_1571")
+}
+
+// FDA Form 1572 - Statement of Investigator  
+model FDAForm1572 {
+  id                   Int       @id @default(autoincrement())
+  documentId           Int       @unique @map("document_id")
+  protocolTitle        String?   @map("protocol_title") @db.Text
+  investigatorName     String?   @map("investigator_name") @db.VarChar(200)
+  investigatorAddress  String?   @map("investigator_address") @db.Text
+  investigatorPhone    String?   @map("investigator_phone") @db.VarChar(50)
+  investigatorEmail    String?   @map("investigator_email") @db.VarChar(200)
+  studySites           Json?     @map("study_sites") @db.JsonB
+  subInvestigators     Json?     @map("sub_investigators") @db.JsonB
+  clinicalLaboratories Json?     @map("clinical_laboratories") @db.JsonB
+  extractionMetadata   Json?     @map("extraction_metadata") @db.JsonB
+  createdAt            DateTime  @default(now()) @map("created_at")
+  updatedAt            DateTime  @updatedAt @map("updated_at")
+
+  document FDADocument @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@index([documentId])
+  @@map("fda_form_1572")
+}
+
+model AuditLog {
+  id            Int       @id @default(autoincrement())
+  timestamp     DateTime  @default(now())
+  action        String
+  targetType    String?   @map("target_type")
+  targetId      String?   @map("target_id")
+  agent         String
+  status        String
+  details       Json?
+  documentHash  String?   @map("document_hash")
+  previousHash  String?   @map("previous_hash")
+  entryHash     String?   @map("entry_hash")
+  organizationId Int?     @map("organization_id")
+
+  organization Organization? @relation(fields: [organizationId], references: [id])
+
+  @@index([organizationId])
+  @@index([action])
+  @@index([timestamp])
+  @@map("audit_trail")
+}
+
+// ==================== Principal Investigator Submission Workflow ====================
+
+model PrincipalInvestigator {
+  id               Int      @id @default(autoincrement())
+  userId           Int      @unique @map("user_id")
+  licenseNumber    String?  @map("license_number")
+  specialization   String?
+  institution      String?
+  address          String?
+  phone            String?
+  email            String?
+  bio              String?  @db.Text
+  qualifications   Json?
+  status           String   @default("active")
+  createdAt        DateTime @default(now()) @map("created_at")
+  updatedAt        DateTime @updatedAt @map("updated_at")
+
+  user              User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  receivedSubmissions TrialSubmission[]
+
+  @@index([status])
+  @@map("principal_investigators")
+}
+
+enum SubmissionStatus {
+  DRAFT
+  SUBMITTED
+  UNDER_REVIEW
+  APPROVED
+  PARTIALLY_APPROVED
+  REJECTED
+  WITHDRAWN
+}
+
+model TrialSubmission {
+  id                    Int              @id @default(autoincrement())
+  trialId               Int              @map("trial_id")
+  principalInvestigatorId Int            @map("principal_investigator_id")
+  submittedByUserId     Int              @map("submitted_by_user_id")
+  status                SubmissionStatus @default(SUBMITTED)
+  submissionDate        DateTime         @default(now()) @map("submission_date")
+  reviewedAt            DateTime?        @map("reviewed_at")
+  notes                 String?          @db.Text
+  reportData            Json?            @map("report_data") // Store TrialReportModal JSON data
+  createdAt             DateTime         @default(now()) @map("created_at")
+  updatedAt             DateTime         @updatedAt @map("updated_at")
+
+  trial                 ClinicalTrial         @relation(fields: [trialId], references: [id], onDelete: Cascade)
+  principalInvestigator PrincipalInvestigator @relation(fields: [principalInvestigatorId], references: [id], onDelete: Cascade)
+  submittedByUser       User                  @relation("SubmissionCreator", fields: [submittedByUserId], references: [id])
+  patients              SubmissionPatient[]
+  reviews               PIReview[]
+
+  @@index([trialId])
+  @@index([principalInvestigatorId])
+  @@index([status])
+  @@index([submissionDate])
+  @@map("trial_submissions")
+}
+
+model SubmissionPatient {
+  id           Int      @id @default(autoincrement())
+  submissionId Int      @map("submission_id")
+  patientId    String   @map("patient_id") // External patient ID from Python backend
+  patientData  Json?    @map("patient_data") // Store patient details snapshot
+  isApproved   Boolean? @map("is_approved") // null = pending, true = approved, false = rejected
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  submission TrialSubmission @relation(fields: [submissionId], references: [id], onDelete: Cascade)
+
+  @@unique([submissionId, patientId])
+  @@index([submissionId])
+  @@index([patientId])
+  @@map("submission_patients")
+}
+
+enum ReviewType {
+  PATIENT_APPROVAL
+  PATIENT_REJECTION
+  DOCUMENT_APPROVAL
+  GENERAL_COMMENT
+  REQUEST_INFO
+}
+
+model PIReview {
+  id           Int        @id @default(autoincrement())
+  submissionId Int        @map("submission_id")
+  reviewType   ReviewType @map("review_type")
+  patientId    String?    @map("patient_id") // Null for general comments
+  comment      String?    @db.Text
+  decision     String?    // "approved", "rejected", "needs_info"
+  reviewedAt   DateTime   @default(now()) @map("reviewed_at")
+  createdAt    DateTime   @default(now()) @map("created_at")
+
+  submission TrialSubmission @relation(fields: [submissionId], references: [id], onDelete: Cascade)
+
+  @@index([submissionId])
+  @@index([reviewType])
+  @@index([reviewedAt])
+  @@map("pi_reviews")
+}
+
+// Patient Screening Analysis - Comprehensive analysis data for each patient
+model PatientScreeningAnalysis {
+  id                   Int      @id @default(autoincrement())
+  trialId              Int      @map("trial_id")
+  patientId            String   @map("patient_id") @db.VarChar(50)
+  organizationId       Int      @map("organization_id")
+  
+  // Match Status
+  eligibilityStatus    String   @map("eligibility_status") // "ELIGIBLE", "POTENTIALLY ELIGIBLE", "INELIGIBLE", "UNCERTAIN", "error"
+  confidenceScore      Float    @map("confidence_score") // 0.0 to 1.0
+  
+  // Patient Basic Info
+  patientAge           Int?     @map("patient_age")
+  patientGender        String?  @map("patient_gender") @db.VarChar(10)
+  patientBirthDate     DateTime? @map("patient_birthdate")
+  
+  // Criteria Counts
+  criteriaMetCount     Int?     @map("criteria_met_count") // Number of inclusion criteria met
+  criteriaTotalCount   Int?     @map("criteria_total_count") // Total inclusion criteria
+  exclusionsTriggered  Int?     @map("exclusions_triggered") // Number of exclusions triggered
+  hardExclusions       Int?     @map("hard_exclusions") // Number of hard exclusions
+  softExclusions       Int?     @map("soft_exclusions") // Number of soft exclusions
+  
+  // Detailed Analysis Data (JSONB for flexibility)
+  analysisReasons      Json     @map("analysis_reasons") @db.JsonB // Full reasons object with scores, weights, details
+  patientConditions    Json?    @map("patient_conditions") @db.JsonB // Patient conditions snapshot
+  patientObservations  Json?    @map("patient_observations") @db.JsonB // Patient lab values snapshot
+  
+  // Metadata
+  screenedAt           DateTime @default(now()) @map("screened_at")
+  createdAt            DateTime @default(now()) @map("created_at")
+  updatedAt            DateTime @updatedAt @map("updated_at")
+
+  @@unique([trialId, patientId, organizationId])
+  @@index([trialId])
+  @@index([patientId])
+  @@index([organizationId])
+  @@index([eligibilityStatus])
+  @@map("patient_screening_analysis")
+}

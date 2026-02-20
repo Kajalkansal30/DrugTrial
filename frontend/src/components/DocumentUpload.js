@@ -11,7 +11,7 @@ import {
     CardContent
 } from '@mui/material';
 import { CloudUpload as UploadIcon } from '@mui/icons-material';
-import axios from 'axios';
+import apiClient from '../utils/apiClient';
 
 const DocumentUpload = ({ onUploadSuccess, apiUrl }) => {
     const [file, setFile] = useState(null);
@@ -37,7 +37,7 @@ const DocumentUpload = ({ onUploadSuccess, apiUrl }) => {
         formData.append('file', file);
 
         try {
-            const response = await axios.post(`${apiUrl}/api/trials/upload`, formData, {
+            const response = await apiClient.post('/api/trials/upload', formData, {
                 headers: {
                     'Content-Type': 'multipart/form-data'
                 }

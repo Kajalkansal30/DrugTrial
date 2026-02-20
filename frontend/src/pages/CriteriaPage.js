@@ -9,11 +9,11 @@ import {
     Psychology, PlayArrow, Close, AutoStories, BarChart,
     Science, LocalHospital
 } from '@mui/icons-material';
-import axios from 'axios';
+import apiClient from '../utils/apiClient';
 import { useParams, useNavigate } from 'react-router-dom';
 import RuleCard from '../components/RuleCard';
 
-const API_URL = process.env.REACT_APP_API_URL || '';
+const API_URL = import.meta.env.VITE_API_URL || '';
 
 const CriteriaPage = () => {
     const { trialId } = useParams();
@@ -31,7 +31,7 @@ const CriteriaPage = () => {
 
     const fetchRules = useCallback(async () => {
         try {
-            const response = await axios.get(`${API_URL}/api/trials/${trialId}/rules`);
+            const response = await apiClient.get(`/api/trials/${trialId}/rules`);
             const fetchedRules = response.data.rules || [];
             setRules(fetchedRules);
             setRuleTypeSummary(response.data._summary || {});
@@ -44,7 +44,7 @@ const CriteriaPage = () => {
 
     const fetchGlossary = useCallback(async () => {
         try {
-            const response = await axios.get(`${API_URL}/api/trials/${trialId}/glossary`);
+            const response = await apiClient.get(`/api/trials/${trialId}/glossary`);
             setGlossaryTerms(response.data.glossary || []);
         } catch (err) {
             setGlossaryTerms([]);
@@ -57,7 +57,7 @@ const CriteriaPage = () => {
         setExtractMessage('Starting criteria extraction...');
 
         try {
-            const res = await axios.post(`${API_URL}/api/trials/${trialId}/extract-criteria`);
+            const res = await apiClient.post(`/api/trials/${trialId}/extract-criteria`);
             if (res.data.status === 'already_extracted') {
                 setExtracting(false);
                 await fetchRules();
@@ -67,7 +67,7 @@ const CriteriaPage = () => {
 
             const poll = setInterval(async () => {
                 try {
-                    const statusRes = await axios.get(`${API_URL}/api/trials/${trialId}/criteria-status`);
+                    const statusRes = await apiClient.get(`/api/trials/${trialId}/criteria-status`);
                     const data = statusRes.data;
                     setExtractProgress(data.progress || 0);
                     setExtractMessage(data.message || 'Processing...');

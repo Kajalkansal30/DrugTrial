@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import axios from 'axios';
+import apiClient from '../utils/apiClient';
 import {
     Drawer, Box, Typography, Divider, List, ListItem,
     ListItemIcon, ListItemText, Chip, Grid, Paper, IconButton,
@@ -14,7 +14,7 @@ import {
 const TrialAnalysisSidebar = ({ open, onClose, patient, trial, analysis }) => {
     const [patientDetails, setPatientDetails] = useState(null);
     const [loadingDetails, setLoadingDetails] = useState(false);
-    const API_URL = process.env.REACT_APP_API_URL || '';
+    const API_URL = import.meta.env.VITE_API_URL || '';
 
     useEffect(() => {
         if (open && patient) {
@@ -27,7 +27,7 @@ const TrialAnalysisSidebar = ({ open, onClose, patient, trial, analysis }) => {
     const fetchPatientDetails = async () => {
         try {
             setLoadingDetails(true);
-            const res = await axios.get(`${API_URL}/api/patients/${patient.id}`);
+            const res = await apiClient.get(`/api/patients/${patient.id}`);
             setPatientDetails(res.data);
             setLoadingDetails(false);
         } catch (err) {
@@ -39,6 +39,16 @@ const TrialAnalysisSidebar = ({ open, onClose, patient, trial, analysis }) => {
     if (!analysis || !patient) return null;
 
     const { eligibility_status, confidence_score, reasons } = analysis;
+
+    console.log('🎨 TrialAnalysisSidebar rendering with:', {
+        hasAnalysis: !!analysis,
+        hasReasons: !!reasons,
+        reasonsKeys: Object.keys(reasons || {}),
+        inclusionDetailsCount: reasons?.inclusion_details?.length || 0,
+        exclusionDetailsCount: reasons?.exclusion_details?.length || 0,
+        sampleInclusion: reasons?.inclusion_details?.[0],
+        sampleExclusion: reasons?.exclusion_details?.[0]
+    });
 
     const getAge = (birthdate) => {
         if (!birthdate) return 'Unknown';
@@ -71,6 +81,17 @@ const TrialAnalysisSidebar = ({ open, onClose, patient, trial, analysis }) => {
     const softExclusions = reasons?.soft_exclusions || 0;
     const adminAutoPassed = reasons?.administrative_auto_passed || 0;
     const missingDataCount = reasons?.missing_data?.length || 0;
+
+    console.log('📊 TrialAnalysisSidebar - Calculated counts:', {
+        inclusionMet,
+        inclusionTotal,
+        exclusionTriggered,
+        exclusionTotal,
+        hardExclusions,
+        softExclusions,
+        willRenderInclusionSection: inclusionTotal > 0,
+        willRenderExclusionSection: exclusionTotal > 0
+    });
 
     const ScoreBar = ({ label, value, weight, color }) => (
         <Box sx={{ mb: 1.5 }}>
