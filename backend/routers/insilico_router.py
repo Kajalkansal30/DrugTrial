@@ -119,15 +119,18 @@ async def get_insilico_results(trial_id: str):
                 "target_analysis": data.get("target_analysis")
             }
 
-    # Fallback: check DB for persisted results and also resolve doc_id -> trial
+    # Fallback: check DB for trial, then resolve doc_{document_id} cache
     try:
         from backend.db_models import get_session, ClinicalTrial
         db = get_session()
         trial = db.query(ClinicalTrial).filter_by(trial_id=str(trial_id)).first()
         if not trial and str(trial_id).isdigit():
             trial = db.query(ClinicalTrial).filter_by(document_id=int(trial_id)).first()
-            if trial:
-                doc_cache = _try_cache(f"doc_{trial_id}")
+
+        if trial:
+            # Check doc_{document_id} cache (pre-trial analysis results)
+            if trial.document_id:
+                doc_cache = _try_cache(f"doc_{trial.document_id}")
                 if doc_cache:
                     db.close()
                     return {
@@ -137,18 +140,20 @@ async def get_insilico_results(trial_id: str):
                         "simulation": doc_cache.get("simulation"),
                         "target_analysis": doc_cache.get("target_analysis")
                     }
-        if trial and trial.analysis_results and 'insilico' in trial.analysis_results:
-            db_data = trial.analysis_results['insilico']
-            db.close()
-            logger.info(f"📂 InSilico loaded from DB for: {trial_id}")
-            return {
-                "status": "ready",
-                "drugs": db_data.get("drugs", []),
-                "interactions": db_data.get("interactions", []),
-                "simulation": db_data.get("simulation"),
-                "target_analysis": db_data.get("target_analysis")
-            }
-        if trial:
+
+            # Check DB-persisted results
+            if trial.analysis_results and 'insilico' in trial.analysis_results:
+                db_data = trial.analysis_results['insilico']
+                db.close()
+                logger.info(f"📂 InSilico loaded from DB for: {trial_id}")
+                return {
+                    "status": "ready",
+                    "drugs": db_data.get("drugs", []),
+                    "interactions": db_data.get("interactions", []),
+                    "simulation": db_data.get("simulation"),
+                    "target_analysis": db_data.get("target_analysis")
+                }
+
             analysis_status = getattr(trial, 'analysis_status', 'pending') or 'pending'
             db.close()
             if analysis_status == 'running':
