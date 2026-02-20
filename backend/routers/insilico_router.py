@@ -86,19 +86,31 @@ async def analyze_insilico_text(payload: Dict[str, str]):
 @router.get("/results/{trial_id}")
 async def get_insilico_results(trial_id: str):
     """
-    Retrieve cached In Silico modeling results for a specific trial.
-    Checks pickle cache first, then falls back to DB.
+    Retrieve cached In Silico modeling results.
+    Checks pickle cache (trial_id and doc_{id} keys), then falls back to DB.
     """
     import pickle
     from pathlib import Path
-    
-    cache_path = Path("/app/data/insilico_cache") / f"{trial_id}.pkl"
-    
-    # 1. Try pickle cache
-    if cache_path.exists():
-        try:
-            with open(cache_path, "rb") as f:
-                data = pickle.load(f)
+
+    cache_dir = Path("/app/data/insilico_cache")
+
+    def _try_cache(key: str):
+        p = cache_dir / f"{key}.pkl"
+        if p.exists():
+            try:
+                with open(p, "rb") as f:
+                    return pickle.load(f)
+            except Exception as e:
+                logger.error(f"Error reading in silico cache {key}: {e}")
+        return None
+
+    cache_keys = [trial_id]
+    if str(trial_id).isdigit():
+        cache_keys.append(f"doc_{trial_id}")
+
+    for key in cache_keys:
+        data = _try_cache(key)
+        if data:
             return {
                 "status": "ready",
                 "drugs": data.get("drugs", []),
@@ -106,16 +118,25 @@ async def get_insilico_results(trial_id: str):
                 "simulation": data.get("simulation"),
                 "target_analysis": data.get("target_analysis")
             }
-        except Exception as e:
-            logger.error(f"Error reading in silico cache: {e}")
-    
-    # 2. Fallback: check DB for persisted results
+
+    # Fallback: check DB for persisted results and also resolve doc_id -> trial
     try:
         from backend.db_models import get_session, ClinicalTrial
         db = get_session()
         trial = db.query(ClinicalTrial).filter_by(trial_id=str(trial_id)).first()
         if not trial and str(trial_id).isdigit():
             trial = db.query(ClinicalTrial).filter_by(document_id=int(trial_id)).first()
+            if trial:
+                doc_cache = _try_cache(f"doc_{trial_id}")
+                if doc_cache:
+                    db.close()
+                    return {
+                        "status": "ready",
+                        "drugs": doc_cache.get("drugs", []),
+                        "interactions": doc_cache.get("interactions", []),
+                        "simulation": doc_cache.get("simulation"),
+                        "target_analysis": doc_cache.get("target_analysis")
+                    }
         if trial and trial.analysis_results and 'insilico' in trial.analysis_results:
             db_data = trial.analysis_results['insilico']
             db.close()
@@ -139,8 +160,8 @@ async def get_insilico_results(trial_id: str):
         db.close()
     except Exception as db_err:
         logger.error(f"⚠️ DB fallback failed for InSilico: {db_err}")
-    
-    return {"status": "not_started", "message": "No trial created yet. Create a trial from this document to start analysis."}
+
+    return {"status": "pending", "message": "In Silico analysis is starting. Results will appear shortly."}
 
 @router.get("/drug/{name}")
 async def get_drug_modeling(name: str):
